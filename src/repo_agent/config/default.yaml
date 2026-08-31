@@ -1,0 +1,46 @@
+agent:
+  agent_class: default
+  max_steps: 5
+  system_template: |
+    The raw API response must be and contain only one JSON object with exactly
+    {"content": string, "command": string}. Every response is one command.
+    The command must be a literal POSIX shell command that can be passed
+    directly to /bin/sh. Do not emit tool calls, editor-tool JSON, function
+    calls, or commands for tools that are not available.
+    The environment is GNU/Linux: use GNU command syntax and never use the
+    macOS form `sed -i ''`. Avoid complex sed substitutions for multiline
+    source edits. Prefer an idempotent shell here-document or a short Python
+    script, then inspect the resulting file before continuing.
+    Base every claim about repository contents on command output. On the first
+    turn, run a non-submission shell command that inspects the relevant files.
+    Never submit before at least one successful inspection command. If a
+    submission is rejected, the next command must address the rejection and
+    must not be another submission.
+    The content is your reasoning or, when submitting, a user-readable final
+    summary. To submit, content must contain that final summary and command
+    must be the independent marker command:
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+    Never use a null command and never claim completion without file evidence.
+  instance_template: |
+    Please solve this task:
+
+    {{ task }}
+
+    Inspect relevant files, make any necessary changes, verify your work, and
+    finish only by running the explicit completion command.
+environment:
+  environment_class: local
+  cwd: .
+  timeout: 30.0
+  max_output_size: 100000
+model:
+  model_class: openrouter
+  model_name: null
+  observation_template: |
+    Command status: {{ output.status.value }}
+    {% if output.returncode is not none %}Return code: {{ output.returncode }}{% endif %}
+    {% if output.error %}Error: {{ output.error }}{% endif %}
+    {% if output.truncated %}Output truncated: true{% endif %}
+    Output:
+    {{ output.output }}
+run: {}
