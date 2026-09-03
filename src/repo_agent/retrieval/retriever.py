@@ -33,7 +33,9 @@ def _tokenize(text: str) -> list[str]:
 class BM25Retriever:
     def __init__(self, chunks: list[Chunk]):
         self.chunks = chunks
-        self._doc_tokens = [_tokenize(chunk.text) for chunk in chunks]
+        self._doc_tokens = [
+            _tokenize(f"{chunk.path} {chunk.name} {chunk.text}") for chunk in chunks
+        ]
         self._doc_lengths = [len(tokens) for tokens in self._doc_tokens]
         self._avg_doc_length = (sum(self._doc_lengths) / len(self._doc_lengths)) if chunks else 0.0
         self._term_freqs = [Counter(tokens) for tokens in self._doc_tokens]

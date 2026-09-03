@@ -10,11 +10,17 @@ from ..config import get_config_from_spec, load_config
 from ..environments import get_environment
 from ..models import get_model
 from ..result import AgentResult, AgentStatus
+from ..retrieval import BM25Retriever, build_index, format_results
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="repo-agent", description="Run an evidence-aware coding agent locally.")
-    parser.add_argument("task", nargs="?", help="Task text; optional when resuming a trajectory.")
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="Task text, or the 'search' command; optional when resuming a trajectory.",
+    )
+    parser.add_argument("query", nargs="?", help="Query text when using the search command.")
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--provider", choices=("openrouter", "groq", "huggingface", "mock"), default=None)
     parser.add_argument("--model", default=None)
@@ -23,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--output", type=Path, default=None, help="Save the trajectory JSON to this path.")
     parser.add_argument("--resume", type=Path, default=None, help="Continue an unfinished trajectory JSON.")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of results returned by the search command.")
     return parser
 
 
@@ -152,8 +159,28 @@ def _config_for_run(args: argparse.Namespace, trajectory: dict | None) -> dict:
     return load_config(args.config, args.override)
 
 
+def _run_search(args: argparse.Namespace) -> int:
+    if args.query is None:
+        raise SystemExit("A query is required: repo-agent search <query> [--workspace PATH]")
+    if args.resume is not None:
+        raise SystemExit("The search command cannot be combined with --resume.")
+    if args.top_k < 1:
+        raise SystemExit("--top-k must be at least 1")
+
+    workspace = (args.workspace or Path(".")).expanduser().resolve()
+    if not workspace.is_dir():
+        raise SystemExit(f"Workspace is not a directory: {workspace}")
+    results = BM25Retriever(build_index(str(workspace))).search(args.query, top_k=args.top_k)
+    print(format_results(results))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.task == "search":
+        return _run_search(args)
+    if args.query is not None:
+        raise SystemExit("Unexpected second positional argument; quote multi-word task text.")
     trajectory = _load_trajectory(args.resume) if args.resume else None
     saved_task = _trajectory_task(trajectory) if trajectory else None
     if args.task is None and saved_task is None:

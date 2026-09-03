@@ -33,6 +33,14 @@ def test_build_index_skips_hidden_and_cache_directories(tmp_path):
     assert [chunk.path for chunk in chunks] == ["visible.py"]
 
 
+def test_build_index_skips_symlinked_files(tmp_path):
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("outside = 1\n", encoding="utf-8")
+    (tmp_path / "linked.py").symlink_to(outside)
+
+    assert build_index(str(tmp_path)) == []
+
+
 def test_invalid_python_falls_back_to_line_chunks(tmp_path):
     (tmp_path / "broken.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
 
@@ -54,6 +62,12 @@ def test_bm25_ranks_matching_chunk_and_formats_location():
     rendered = format_results(results)
     assert "# alpha.py :: alpha (lines 2-3, score=" in rendered
     assert "return 'needle'" in rendered
+
+
+def test_bm25_can_match_file_path_and_symbol_name():
+    chunk = Chunk("src/payment_service.py", "calculate_total", 1, 2, "return 42")
+
+    assert BM25Retriever([chunk]).search("payment_service calculate_total")[0].chunk == chunk
 
 
 def test_bm25_handles_chinese_queries_and_empty_inputs():

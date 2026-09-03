@@ -10,6 +10,8 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 - Dependency-free source chunking and BM25 retrieval with English identifier
   and Chinese character matching.
+- Local `repo-agent search` command for querying a workspace without a model or
+  API key.
 
 ## [0.1.0] - 2026-08-31
 

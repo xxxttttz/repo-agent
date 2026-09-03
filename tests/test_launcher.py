@@ -1,8 +1,7 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
-
+from pathlib import Path
 
 LAUNCHER = Path(__file__).parents[1] / "repo-agent"
 
@@ -73,3 +72,18 @@ def test_launcher_provider_can_be_overridden_with_environment(tmp_path):
     assert completed.returncode == 0
     assert "ls -la" in completed.stdout
     assert "Submitting the result." in completed.stdout
+
+
+def test_launcher_search_does_not_require_a_provider(tmp_path):
+    (tmp_path / "service.py").write_text("def unique_symbol():\n    return 1\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [str(LAUNCHER), "search", "unique_symbol", "--workspace", str(tmp_path)],
+        capture_output=True,
+        check=False,
+        env=launcher_env(REPO_AGENT_PROVIDER="openrouter"),
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert "# service.py :: unique_symbol" in completed.stdout

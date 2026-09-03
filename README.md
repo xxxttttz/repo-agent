@@ -42,6 +42,13 @@ print(format_results(results))
 
 检索结果包含相对路径、符号名和行号，可作为 Agent 的候选上下文。当前版本不会自动把检索结果注入模型消息；调用方可以先筛选结果，再明确选择要提供的上下文。
 
+也可以直接通过 CLI 检索，不需要配置模型或 API key：
+
+```bash
+repo-agent search "completion policy" --workspace . --top-k 5
+./repo-agent search "代码检索" --workspace ./my-project
+```
+
 ## 安装
 
 ```bash

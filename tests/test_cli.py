@@ -1,8 +1,10 @@
 import json
 
-from repo_agent.run.local import build_parser, main, print_result
+import pytest
+
 from repo_agent.environments.local import ExecutionStatus
 from repo_agent.result import AgentResult, AgentStatus, AgentStep
+from repo_agent.run.local import build_parser, main, print_result
 
 
 def test_print_result_shows_execution_diagnostics(capsys):
@@ -30,6 +32,25 @@ def test_parser_allows_resume_without_positional_task():
     args = build_parser().parse_args(["--resume", "trajectory.json"])
     assert args.task is None
     assert str(args.resume) == "trajectory.json"
+
+
+def test_cli_searches_workspace_without_loading_a_model(tmp_path, capsys):
+    (tmp_path / "example.py").write_text(
+        "def calculate_total():\n    return 42\n",
+        encoding="utf-8",
+    )
+
+    status = main(["search", "calculate_total", "--workspace", str(tmp_path), "--top-k", "1"])
+
+    assert status == 0
+    output = capsys.readouterr().out
+    assert "# example.py :: calculate_total (lines 1-2, score=" in output
+    assert "return 42" in output
+
+
+def test_cli_search_requires_query():
+    with pytest.raises(SystemExit, match="A query is required"):
+        main(["search"])
 
 
 def test_cli_resumes_saved_task_workspace_and_mock_provider(tmp_path, capsys):

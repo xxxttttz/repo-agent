@@ -35,6 +35,8 @@ def build_index(cwd: str) -> list[Chunk]:
             if ext not in _TEXT_EXTENSIONS:
                 continue
             abs_path = os.path.join(root, filename)
+            if os.path.islink(abs_path):
+                continue
             rel_path = os.path.relpath(abs_path, cwd)
             try:
                 with open(abs_path, "r", encoding="utf-8") as handle:
