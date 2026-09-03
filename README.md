@@ -27,6 +27,21 @@ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
 
 并且任务中提到的目标文件必须已经被成功读取。提交命令输出 marker 后的文本会成为最终答案；如果没有后续文本，则使用 assistant message 的内容作为答案。
 
+### 本地源码检索
+
+`repo_agent.retrieval` 提供不增加第三方依赖的源码索引和 BM25 词法检索。Python
+文件按顶层函数和类分块，其他支持的文本文件按行分块：
+
+```python
+from repo_agent.retrieval import BM25Retriever, build_index, format_results
+
+chunks = build_index("./my-project")
+results = BM25Retriever(chunks).search("completion policy", top_k=5)
+print(format_results(results))
+```
+
+检索结果包含相对路径、符号名和行号，可作为 Agent 的候选上下文。当前版本不会自动把检索结果注入模型消息；调用方可以先筛选结果，再明确选择要提供的上下文。
+
 ## 安装
 
 ```bash
