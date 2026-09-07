@@ -26,10 +26,20 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+service = ["fastapi>=0.115,<0.116", "redis>=5", "uvicorn[standard]>=0.30"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "build>=1.2",
+    "httpx>=0.27",
+    "fastapi>=0.115,<0.116",
+    "redis>=5",
+    "uvicorn[standard]>=0.30",
+]
 
 [project.scripts]
 repo-agent = "repo_agent.run.local:main"
+repo-agent-api = "repo_agent.api:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

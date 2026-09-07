@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 
 from ..agents import get_agent
@@ -10,7 +11,7 @@ from ..config import get_config_from_spec, load_config
 from ..environments import get_environment
 from ..models import get_model
 from ..result import AgentResult, AgentStatus
-from ..retrieval import BM25Retriever, build_index, format_results
+from ..retrieval import BM25Retriever, RedisChunkCache, build_index, format_results
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None, help="Save the trajectory JSON to this path.")
     parser.add_argument("--resume", type=Path, default=None, help="Continue an unfinished trajectory JSON.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results returned by the search command.")
+    parser.add_argument(
+        "--redis-url",
+        default=None,
+        help="Redis URL for content-hash index caching (or set REDIS_URL).",
+    )
     return parser
 
 
@@ -170,7 +176,9 @@ def _run_search(args: argparse.Namespace) -> int:
     workspace = (args.workspace or Path(".")).expanduser().resolve()
     if not workspace.is_dir():
         raise SystemExit(f"Workspace is not a directory: {workspace}")
-    results = BM25Retriever(build_index(str(workspace))).search(args.query, top_k=args.top_k)
+    redis_url = args.redis_url or os.getenv("REDIS_URL")
+    cache = RedisChunkCache(redis_url) if redis_url else None
+    results = BM25Retriever(build_index(str(workspace), cache=cache)).search(args.query, top_k=args.top_k)
     print(format_results(results))
     return 0
 

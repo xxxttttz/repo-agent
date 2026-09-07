@@ -1,0 +1,94 @@
+"""Reusable task execution for the HTTP service."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+from dataclasses import dataclass
+from pathlib import Path
+
+from .agents import get_agent
+from .config import load_config
+from .environments import get_environment
+from .models import get_model
+from .retrieval import (
+    BM25Retriever,
+    ChunkCache,
+    IndexStats,
+    build_index,
+    format_results,
+)
+from .run.local import _component_configs
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTask:
+    task: str
+    workspace: Path
+    provider: str = "mock"
+    model: str | None = None
+    max_steps: int = 5
+    top_k: int = 5
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceTaskResult:
+    trajectory: dict
+    index: dict[str, int]
+
+
+def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> ServiceTaskResult:
+    """Index a workspace, add relevant context, and run one agent task."""
+    workspace = spec.workspace.expanduser().resolve()
+    if not workspace.is_dir():
+        raise ValueError(f"Workspace is not a directory: {workspace}")
+    if spec.max_steps < 1:
+        raise ValueError("max_steps must be at least 1")
+    if spec.top_k < 1:
+        raise ValueError("top_k must be at least 1")
+
+    args = argparse.Namespace(
+        workspace=workspace,
+        provider=spec.provider,
+        model=spec.model,
+        max_steps=spec.max_steps,
+    )
+    config = load_config()
+    agent_config, environment_config, model_config = _component_configs(config, args)
+    environment_config["cwd"] = str(workspace)
+
+    stats = IndexStats()
+    chunks = build_index(str(workspace), cache=cache, stats=stats)
+    context = format_results(BM25Retriever(chunks).search(spec.task, top_k=spec.top_k))
+    base_template = agent_config.get("instance_template", "Task: {{ task }}")
+    agent_config["instance_template"] = (
+        f"{base_template}\n\nRelevant source context from the workspace index:\n"
+        "{{ retrieval_context }}"
+    )
+    agent_config["retrieval_context"] = context
+
+    model = get_model(model_config)
+    environment = get_environment(environment_config)
+    serialized_agent_config = copy.deepcopy(agent_config)
+    serialized_agent_config.pop("retrieval_context", None)
+    component_config = {
+        "agent": serialized_agent_config,
+        "environment": copy.deepcopy(environment_config),
+        "model": copy.deepcopy(model_config),
+        "run": copy.deepcopy(config.get("run", {})),
+    }
+    agent = get_agent(
+        model,
+        environment,
+        {**agent_config, "component_config": component_config},
+    )
+    agent.run(spec.task)
+    return ServiceTaskResult(
+        agent.serialize(),
+        {
+            "files": stats.files,
+            "chunks": len(chunks),
+            "cache_hits": stats.cache_hits,
+            "cache_misses": stats.cache_misses,
+        },
+    )

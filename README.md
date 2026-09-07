@@ -40,7 +40,9 @@ results = BM25Retriever(chunks).search("completion policy", top_k=5)
 print(format_results(results))
 ```
 
-检索结果包含相对路径、符号名和行号，可作为 Agent 的候选上下文。当前版本不会自动把检索结果注入模型消息；调用方可以先筛选结果，再明确选择要提供的上下文。
+检索结果包含相对路径、符号名和行号，可作为 Agent 的候选上下文。CLI `search`
+只输出候选上下文；HTTP 任务服务会自动用任务文本检索，并把 top-k 结果作为只读上下文
+注入 Agent。原始任务文本仍独立用于 evidence policy 校验。
 
 也可以直接通过 CLI 检索，不需要配置模型或 API key：
 
@@ -48,6 +50,70 @@ print(format_results(results))
 repo-agent search "completion policy" --workspace . --top-k 5
 ./repo-agent search "代码检索" --workspace ./my-project
 ```
+
+### Redis 增量索引缓存
+
+设置 `REDIS_URL` 后，索引器会用“分块器版本 + 文件扩展名 + 文件内容 SHA-256”作为
+Redis key。每次仍会扫描可索引文件并计算哈希，以识别变化，但内容未变的文件会直接
+反序列化已有 chunks，不再重复 AST 解析或按行分块。缓存默认保留 7 天；Redis 读取、
+写入或连接失败会记 warning 并退化为正常构建，不会让任务失败。
+
+```bash
+REDIS_URL=redis://localhost:6379/0 \
+  repo-agent search "completion policy" --workspace .
+```
+
+也可以用 `--redis-url` 显式传入。缓存值不保存绝对路径，相同内容可跨 workspace
+复用，同时避免把宿主机路径写进 Redis。
+
+## HTTP 服务与 Docker
+
+服务提供异步任务接口：`POST /tasks` 返回 `202` 和任务 id，`GET /tasks/{id}` 返回
+`queued`、`running`、Agent 的终态、trajectory，以及本次索引的
+`files/chunks/cache_hits/cache_misses` 指标。
+
+```bash
+docker compose up --build
+
+curl -i -X POST http://localhost:8000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"task":"Explain the retrieval cache","workspace":"project","provider":"mock"}'
+
+curl http://localhost:8000/tasks/TASK_ID
+```
+
+Compose 会启动 API 与持久化 Redis，并把当前仓库挂载到容器内的
+`/workspace/project`；API 容器默认沿用宿主机的 `UID/GID`，因此 Agent 可以修改挂载
+仓库且不会生成 root-owned 文件。默认使用 `mock`，需要真实模型时可设置
+`REPO_AGENT_PROVIDER`、`REPO_AGENT_MODEL` 及相应 API key 后重启。
+
+不使用 Docker 时：
+
+```bash
+python -m pip install -e '.[service]'
+REPO_AGENT_WORKSPACE_ROOT=/path/to/workspaces \
+REDIS_URL=redis://localhost:6379/0 repo-agent-api
+```
+
+宿主机使用本地代理时，也可以只让 Redis 运行在 Compose 中，并在宿主机启动 API：
+
+```bash
+docker compose stop api
+docker compose up -d redis
+set -a && . ./.env && set +a
+REPO_AGENT_WORKSPACE_ROOT="$(dirname "$PWD")" \
+REDIS_URL=redis://127.0.0.1:6379/0 \
+HTTP_PROXY=http://127.0.0.1:10808 \
+HTTPS_PROXY=http://127.0.0.1:10808 \
+repo-agent-api
+```
+
+此模式下仍完整经过 FastAPI 和 Redis，只是 API 进程直接复用宿主机代理。
+
+服务拒绝访问 `REPO_AGENT_WORKSPACE_ROOT` 之外的目录。任务状态当前保存在单个 API
+进程内，适合单实例部署；进程重启会丢失状态，多副本和可靠队列可后续接入 Redis
+Streams/Celery。Agent 会在挂载的 workspace 执行命令，因此生产环境仍应使用专用
+容器或更强的沙箱，并配置认证和网络边界。
 
 ## 安装
 

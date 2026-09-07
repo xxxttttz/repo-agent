@@ -18,7 +18,8 @@ from ..result import AgentResult, AgentStatus, AgentStep
 class DefaultAgent:
     def __init__(self, model: ModelBackend, env: LocalEnvironment, max_steps: int = 5,
                  completion_policy: CompletionPolicy | None = None, system_template: str | None = None,
-                 instance_template: str | None = None, component_config: dict | None = None):
+                 instance_template: str | None = None, component_config: dict | None = None,
+                 retrieval_context: str = ""):
         self.model = model
         self.env = env
         self.max_steps = max_steps
@@ -26,6 +27,7 @@ class DefaultAgent:
         self.system_template = system_template or "You are a coding agent. Use shell actions and submit with the completion marker."
         self.instance_template = instance_template or "Task: {{ task }}"
         self.component_config = copy.deepcopy(component_config or {})
+        self.retrieval_context = retrieval_context
         self.messages: list[dict] = []
         self._last_result: AgentResult | None = None
         self._task: str | None = None
@@ -44,6 +46,7 @@ class DefaultAgent:
         variables.update(self.model.get_template_vars())
         variables.update({"max_steps": self.max_steps})
         variables.update({"task": task})  # task is always the caller's value
+        variables.update({"retrieval_context": self.retrieval_context})
         self.messages.extend([
             {"role": "system", "content": self._render(self.system_template, **variables)},
             {"role": "user", "content": self._render(self.instance_template, **variables)},

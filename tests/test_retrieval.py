@@ -1,4 +1,27 @@
-from repo_agent.retrieval import BM25Retriever, Chunk, build_index, format_results
+from repo_agent.retrieval import (
+    BM25Retriever,
+    Chunk,
+    IndexStats,
+    RedisChunkCache,
+    build_index,
+    format_results,
+)
+
+
+class MemoryCache:
+    def __init__(self):
+        self.values = {}
+        self.set_calls = 0
+
+    def get(self, key, path):
+        chunks = self.values.get(key)
+        if chunks is None:
+            return None
+        return [Chunk(path, chunk.name, chunk.start_line, chunk.end_line, chunk.text) for chunk in chunks]
+
+    def set(self, key, chunks):
+        self.set_calls += 1
+        self.values[key] = list(chunks)
 
 
 def test_build_index_chunks_python_definitions_and_text_files(tmp_path):
@@ -48,6 +71,51 @@ def test_invalid_python_falls_back_to_line_chunks(tmp_path):
 
     assert len(chunks) == 1
     assert chunks[0].name == "lines 1-2"
+
+
+def test_build_index_reuses_content_hash_cache_and_invalidates_changed_file(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    cache = MemoryCache()
+    first_stats = IndexStats()
+    second_stats = IndexStats()
+
+    first = build_index(str(tmp_path), cache=cache, stats=first_stats)
+    second = build_index(str(tmp_path), cache=cache, stats=second_stats)
+
+    assert second == first
+    assert first_stats.cache_misses == 1
+    assert second_stats.cache_hits == 1
+    assert cache.set_calls == 1
+
+    source.write_text("def beta():\n    return 2\n", encoding="utf-8")
+    changed_stats = IndexStats()
+    changed = build_index(str(tmp_path), cache=cache, stats=changed_stats)
+    assert changed[0].name == "beta"
+    assert changed_stats.cache_misses == 1
+    assert cache.set_calls == 2
+
+
+def test_redis_chunk_cache_serializes_chunks_without_workspace_path():
+    class FakeRedis:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, ex):
+            self.values[key] = value
+            self.expiry = ex
+
+    client = FakeRedis()
+    cache = RedisChunkCache(client=client, ttl_seconds=30)
+    cache.set("digest", [Chunk("old/app.py", "run", 1, 2, "def run():\n    pass")])
+
+    restored = cache.get("digest", "new/app.py")
+
+    assert restored == [Chunk("new/app.py", "run", 1, 2, "def run():\n    pass")]
+    assert client.expiry == 30
 
 
 def test_bm25_ranks_matching_chunk_and_formats_location():

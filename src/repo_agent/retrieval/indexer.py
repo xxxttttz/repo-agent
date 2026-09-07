@@ -8,12 +8,18 @@ dependency policy. Python files are split by function/class using
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .cache import ChunkCache
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache", ".pytest_cache"}
 _TEXT_EXTENSIONS = {".py", ".md", ".txt", ".rst", ".yaml", ".yml", ".toml", ".json"}
 _FALLBACK_CHUNK_LINES = 60
+_CHUNKER_VERSION = "v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +31,19 @@ class Chunk:
     text: str
 
 
-def build_index(cwd: str) -> list[Chunk]:
-    """Walk ``cwd`` and return chunks for every indexable text file."""
+@dataclass(slots=True)
+class IndexStats:
+    files: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+
+
+def build_index(
+    cwd: str,
+    cache: ChunkCache | None = None,
+    stats: IndexStats | None = None,
+) -> list[Chunk]:
+    """Walk ``cwd`` and return chunks, reusing content-derived cached chunks."""
     chunks: list[Chunk] = []
     for root, dirs, files in os.walk(cwd):
         dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS and not d.startswith("."))
@@ -43,11 +60,31 @@ def build_index(cwd: str) -> list[Chunk]:
                     source = handle.read()
             except (OSError, UnicodeDecodeError):
                 continue
+            if stats is not None:
+                stats.files += 1
+            cache_key = _cache_key(ext, source)
+            if cache is not None:
+                cached = cache.get(cache_key, rel_path)
+                if cached is not None:
+                    if stats is not None:
+                        stats.cache_hits += 1
+                    chunks.extend(cached)
+                    continue
+                if stats is not None:
+                    stats.cache_misses += 1
             if ext == ".py":
-                chunks.extend(_chunk_python(rel_path, source))
+                file_chunks = _chunk_python(rel_path, source)
             else:
-                chunks.extend(_chunk_fallback(rel_path, source))
+                file_chunks = _chunk_fallback(rel_path, source)
+            chunks.extend(file_chunks)
+            if cache is not None:
+                cache.set(cache_key, file_chunks)
     return chunks
+
+
+def _cache_key(extension: str, source: str) -> str:
+    material = f"{_CHUNKER_VERSION}\0{extension}\0".encode() + source.encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 def _chunk_python(rel_path: str, source: str) -> list[Chunk]:
