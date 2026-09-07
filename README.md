@@ -68,7 +68,7 @@ REDIS_URL=redis://localhost:6379/0 \
 
 ## HTTP 服务与 Docker
 
-服务提供异步任务接口：`POST /tasks` 返回 `202` 和任务 id，`GET /tasks/{id}` 返回
+服务提供异步任务接口：`POST /tasks` 返回 `202`、任务 id 和 session id，`GET /tasks/{id}` 返回
 `queued`、`running`、Agent 的终态、trajectory，以及本次索引的
 `files/chunks/cache_hits/cache_misses` 指标。
 
@@ -81,6 +81,31 @@ curl -i -X POST http://localhost:8000/tasks \
 
 curl http://localhost:8000/tasks/TASK_ID
 ```
+
+### Redis 会话记忆
+
+相关任务可以共享一个 session。会话按 workspace 隔离，默认在 Redis 中保留最近 8 个
+已完成任务的“任务文本 + 最终答案”，每次访问后 TTL 刷新为 24 小时。历史作为上下文
+注入后续 Agent，但当前任务始终拥有更高优先级。
+
+```bash
+# 可选：先显式创建 session
+curl -X POST http://localhost:8000/sessions \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"project"}'
+
+# 后续任务复用返回的 session_id
+curl -X POST http://localhost:8000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"task":"记住我们使用 Redis","workspace":"project","session_id":"SESSION_ID"}'
+
+curl 'http://localhost:8000/sessions/SESSION_ID?workspace=project'
+```
+
+不传 `session_id` 时服务会自动生成，并在 `POST /tasks` 响应中返回；要延续记忆，下一
+次请求必须带回同一个 id。可通过 `REPO_AGENT_SESSION_TTL` 和
+`REPO_AGENT_SESSION_MAX_TURNS` 调整过期秒数及最大轮数。未配置 Redis 时会退化为
+进程内会话记忆，重启即丢失。
 
 Compose 会启动 API 与持久化 Redis，并把当前仓库挂载到容器内的
 `/workspace/project`；API 容器默认沿用宿主机的 `UID/GID`，因此 Agent 可以修改挂载
@@ -101,7 +126,7 @@ REDIS_URL=redis://localhost:6379/0 repo-agent-api
 docker compose stop api
 docker compose up -d redis
 set -a && . ./.env && set +a
-REPO_AGENT_WORKSPACE_ROOT="$(dirname "$PWD")" \
+REPO_AGENT_WORKSPACE_ROOT="$PWD" \
 REDIS_URL=redis://127.0.0.1:6379/0 \
 HTTP_PROXY=http://127.0.0.1:10808 \
 HTTPS_PROXY=http://127.0.0.1:10808 \
@@ -110,9 +135,9 @@ repo-agent-api
 
 此模式下仍完整经过 FastAPI 和 Redis，只是 API 进程直接复用宿主机代理。
 
-服务拒绝访问 `REPO_AGENT_WORKSPACE_ROOT` 之外的目录。任务状态当前保存在单个 API
-进程内，适合单实例部署；进程重启会丢失状态，多副本和可靠队列可后续接入 Redis
-Streams/Celery。Agent 会在挂载的 workspace 执行命令，因此生产环境仍应使用专用
+服务拒绝访问 `REPO_AGENT_WORKSPACE_ROOT` 之外的目录。已完成的 session 记忆由 Redis
+持久化，但任务状态当前仍保存在单个 API 进程内；进程重启后任务 id 会丢失，多副本和
+可靠队列可后续接入 Redis Streams/Celery。Agent 会在挂载的 workspace 执行命令，因此生产环境仍应使用专用
 容器或更强的沙箱，并配置认证和网络边界。
 
 ## 安装

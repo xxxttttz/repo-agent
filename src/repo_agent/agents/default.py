@@ -9,7 +9,7 @@ from typing import Any
 from jinja2 import StrictUndefined, Template
 
 from .. import __version__
-from ..environments.local import ExecutionResult, ExecutionStatus, LocalEnvironment
+from ..environments.local import ExecutionStatus, LocalEnvironment
 from ..models import AgentAction, ModelBackend
 from ..policies import CompletionContext, CompletionPolicy, FileEvidenceCompletionPolicy
 from ..result import AgentResult, AgentStatus, AgentStep
@@ -19,7 +19,7 @@ class DefaultAgent:
     def __init__(self, model: ModelBackend, env: LocalEnvironment, max_steps: int = 5,
                  completion_policy: CompletionPolicy | None = None, system_template: str | None = None,
                  instance_template: str | None = None, component_config: dict | None = None,
-                 retrieval_context: str = ""):
+                 retrieval_context: str = "", conversation_context: str = ""):
         self.model = model
         self.env = env
         self.max_steps = max_steps
@@ -28,6 +28,7 @@ class DefaultAgent:
         self.instance_template = instance_template or "Task: {{ task }}"
         self.component_config = copy.deepcopy(component_config or {})
         self.retrieval_context = retrieval_context
+        self.conversation_context = conversation_context
         self.messages: list[dict] = []
         self._last_result: AgentResult | None = None
         self._task: str | None = None
@@ -47,6 +48,7 @@ class DefaultAgent:
         variables.update({"max_steps": self.max_steps})
         variables.update({"task": task})  # task is always the caller's value
         variables.update({"retrieval_context": self.retrieval_context})
+        variables.update({"conversation_context": self.conversation_context})
         self.messages.extend([
             {"role": "system", "content": self._render(self.system_template, **variables)},
             {"role": "user", "content": self._render(self.instance_template, **variables)},
@@ -104,7 +106,7 @@ class DefaultAgent:
         for step_number in range(first_step_number, first_step_number + self.max_steps):
             try:
                 raw_message = self.model.query(self.messages)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - provider failures become AgentResult.ERROR.
                 self.messages.append({
                     "role": "exit",
                     "content": str(error),

@@ -1,3 +1,4 @@
+from repo_agent.memory import MemoryTurn
 from repo_agent.service import ServiceTask, execute_task
 
 
@@ -27,3 +28,21 @@ def test_service_task_runs_with_retrieval_and_reports_cache_hits(tmp_path):
     assert "calculate_total" in first.trajectory["messages"][1]["content"]
     assert first.index["cache_misses"] == 1
     assert second.index["cache_hits"] == 1
+
+
+def test_service_task_injects_prior_session_memory(tmp_path):
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    spec = ServiceTask(
+        "What did we decide?",
+        tmp_path,
+        provider="mock",
+        max_steps=2,
+        memory=(MemoryTurn("Choose a cache", "Use Redis.", "2026-01-01T00:00:00Z"),),
+    )
+
+    result = execute_task(spec)
+
+    prompt = result.trajectory["messages"][1]["content"]
+    assert "Prior completed tasks in this session" in prompt
+    assert "Choose a cache" in prompt
+    assert "Use Redis." in prompt

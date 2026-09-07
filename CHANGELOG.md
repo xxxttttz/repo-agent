@@ -15,6 +15,8 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 - Redis content-hash caching for per-file source chunks with graceful fallback.
 - Asynchronous FastAPI task submission/status endpoints with indexed context.
 - Docker and Compose deployment for the API and persistent Redis service.
+- Workspace-scoped Redis conversation memory with session APIs, bounded history,
+  and sliding TTL.
 
 ## [0.1.0] - 2026-08-31
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from .agents import get_agent
 from .config import load_config
 from .environments import get_environment
+from .memory import MemoryTurn, format_memory
 from .models import get_model
 from .retrieval import (
     BM25Retriever,
@@ -29,6 +30,7 @@ class ServiceTask:
     model: str | None = None
     max_steps: int = 5
     top_k: int = 5
+    memory: tuple[MemoryTurn, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +68,18 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
         "{{ retrieval_context }}"
     )
     agent_config["retrieval_context"] = context
+    if spec.memory:
+        agent_config["instance_template"] += (
+            "\n\nPrior completed tasks in this session (context only; the current task takes priority):\n"
+            "{{ conversation_context }}"
+        )
+        agent_config["conversation_context"] = format_memory(list(spec.memory))
 
     model = get_model(model_config)
     environment = get_environment(environment_config)
     serialized_agent_config = copy.deepcopy(agent_config)
     serialized_agent_config.pop("retrieval_context", None)
+    serialized_agent_config.pop("conversation_context", None)
     component_config = {
         "agent": serialized_agent_config,
         "environment": copy.deepcopy(environment_config),
