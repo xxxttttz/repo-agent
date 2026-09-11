@@ -6,7 +6,7 @@ import pytest
 from repo_agent import Agent, Environment, Model, __version__
 from repo_agent.agents import DefaultAgent, get_agent, get_agent_class
 from repo_agent.config import builtin_config_dir, get_config_from_spec, load_config
-from repo_agent.environments import LocalEnvironment, get_environment, get_environment_class
+from repo_agent.environments import DockerEnvironment, LocalEnvironment, get_environment, get_environment_class
 from repo_agent.models import GroqModel, HuggingFaceModel, MockModel, OpenRouterModel, get_model, get_model_class
 from repo_agent.policies import CompletionContext, FileEvidenceCompletionPolicy
 from repo_agent.run.local import _component_configs, build_parser
@@ -16,6 +16,7 @@ def test_shortcut_and_full_path_factories():
     assert get_agent_class("default") is DefaultAgent
     assert get_agent_class("repo_agent.agents.default.DefaultAgent") is DefaultAgent
     assert get_environment_class("local") is LocalEnvironment
+    assert get_environment_class("docker") is DockerEnvironment
     assert get_environment_class("repo_agent.environments.local.LocalEnvironment") is LocalEnvironment
     assert get_model_class("mock") is MockModel
     assert get_model_class("huggingface") is HuggingFaceModel

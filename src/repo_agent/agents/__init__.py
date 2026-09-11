@@ -18,9 +18,17 @@ def get_agent_class(spec: str) -> type[Agent]:
         raise ValueError(f"Unknown agent type: {spec} (resolved to {full_path}, available: {_AGENT_MAPPING})") from error
 
 
-def get_agent(model, env, config: dict | None = None, *, default_type: str = "default") -> Agent:
+def get_agent(
+    model,
+    env,
+    config: dict | None = None,
+    *,
+    default_type: str = "default",
+    runtime: dict | None = None,
+) -> Agent:
     values = copy.deepcopy(config or {})
     agent_class = values.pop("agent_class", default_type)
+    values.update(runtime or {})
     return get_agent_class(agent_class)(model, env, **values)
 
 

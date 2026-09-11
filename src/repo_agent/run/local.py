@@ -55,6 +55,8 @@ def print_result(result: AgentResult, *, skip_steps: int = 0) -> None:
             print("Output truncated: display contains only the captured limit.")
     if result.status is AgentStatus.COMPLETED:
         print(result.answer)
+    elif result.status is AgentStatus.CANCELLED:
+        print("\nAgent stopped: task was cancelled.")
     elif result.status is AgentStatus.MAX_STEPS:
         new_steps = result.step_count - skip_steps
         if skip_steps:

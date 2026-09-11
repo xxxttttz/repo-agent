@@ -1,5 +1,5 @@
-import json
 import copy
+import json
 
 import pytest
 
@@ -46,6 +46,28 @@ def test_messages_reset_on_each_run(tmp_path):
     assert agent.messages == list(second.messages)
     assert first.messages != second.messages
     assert "two" in agent.messages[1]["content"]
+
+
+def test_cancellation_stops_before_the_next_step(tmp_path):
+    cancelled = False
+
+    def cancellation_check():
+        nonlocal cancelled
+        was_cancelled = cancelled
+        cancelled = True
+        return was_cancelled
+
+    model = SequenceModel([action("inspect", "pwd"), action("should not run", "pwd")])
+    result = DefaultAgent(
+        model,
+        LocalEnvironment(str(tmp_path)),
+        max_steps=2,
+        cancellation_check=cancellation_check,
+    ).run("Inspect the project")
+
+    assert result.status is AgentStatus.CANCELLED
+    assert result.step_count == 1
+    assert result.messages[-1]["extra"]["exit_status"] == "cancelled"
 
 
 def test_submission_rejection_continues_and_normal_commands_are_evidence(tmp_path):

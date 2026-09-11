@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,4 +88,66 @@ async def test_api_rejects_workspace_outside_root(tmp_path, monkeypatch):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/tasks", json={"task": "Inspect", "workspace": str(tmp_path.parent)})
     assert response.status_code == 400
+    app.state.task_manager.close()
+
+
+@pytest.mark.anyio
+async def test_task_events_stream_terminal_snapshot(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    monkeypatch.setenv("REPO_AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        accepted = await client.post(
+            "/tasks", json={"task": "Inspect project", "provider": "mock", "max_steps": 2}
+        )
+        task_id = accepted.json()["id"]
+        await wait_for_task(client, task_id)
+
+        response = await client.get(f"/tasks/{task_id}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: task" in response.text
+    assert '\"status\":\"completed\"' in response.text
+    app.state.task_manager.close()
+
+
+@pytest.mark.anyio
+async def test_cancel_running_task_at_step_boundary(tmp_path, monkeypatch):
+    release = threading.Event()
+
+    def controlled_execute(spec, *, cache=None):
+        release.wait(timeout=2)
+        status_value = "cancelled" if spec.cancellation_check() else "completed"
+        return SimpleNamespace(
+            trajectory={"status": status_value, "answer": "stopped", "messages": [], "steps": []},
+            index={"files": 0, "chunks": 0, "cache_hits": 0, "cache_misses": 0},
+        )
+
+    monkeypatch.setattr("repo_agent.api.execute_task", controlled_execute)
+    monkeypatch.setenv("REPO_AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        accepted = await client.post("/tasks", json={"task": "Long task", "provider": "mock"})
+        task_id = accepted.json()["id"]
+        for _ in range(100):
+            if (await client.get(f"/tasks/{task_id}")).json()["status"] == "running":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("task did not start")
+
+        response = await client.post(f"/tasks/{task_id}/cancel")
+        assert response.status_code == 202
+        assert response.json()["cancel_requested"] is True
+        release.set()
+        payload = await wait_for_task(client, task_id)
+
+    assert payload["status"] == "cancelled"
+    repeated = app.state.task_manager.cancel(task_id)
+    assert repeated["status"] == "cancelled"
     app.state.task_manager.close()

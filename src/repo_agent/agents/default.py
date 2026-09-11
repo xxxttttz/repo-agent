@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,8 @@ class DefaultAgent:
     def __init__(self, model: ModelBackend, env: LocalEnvironment, max_steps: int = 5,
                  completion_policy: CompletionPolicy | None = None, system_template: str | None = None,
                  instance_template: str | None = None, component_config: dict | None = None,
-                 retrieval_context: str = "", conversation_context: str = ""):
+                 retrieval_context: str = "", conversation_context: str = "",
+                 cancellation_check: Callable[[], bool] | None = None):
         self.model = model
         self.env = env
         self.max_steps = max_steps
@@ -29,6 +31,7 @@ class DefaultAgent:
         self.component_config = copy.deepcopy(component_config or {})
         self.retrieval_context = retrieval_context
         self.conversation_context = conversation_context
+        self.cancellation_check = cancellation_check or (lambda: False)
         self.messages: list[dict] = []
         self._last_result: AgentResult | None = None
         self._task: str | None = None
@@ -104,6 +107,8 @@ class DefaultAgent:
         )
         first_step_number = len(steps) + 1
         for step_number in range(first_step_number, first_step_number + self.max_steps):
+            if self.cancellation_check():
+                return self._cancelled_result(steps)
             try:
                 raw_message = self.model.query(self.messages)
             except Exception as error:  # noqa: BLE001 - provider failures become AgentResult.ERROR.
@@ -146,6 +151,8 @@ class DefaultAgent:
             step = AgentStep(step_number, last_content, command, execution.output, execution.returncode,
                              execution.status, execution.error, execution.truncated, None, execution.submission)
             steps.append(step)
+            if self.cancellation_check():
+                return self._cancelled_result(steps)
             if execution.submission is not None:
                 decision = self.completion_policy.evaluate(CompletionContext(
                     task=task, environment=self.env, successful_commands=tuple(successful_commands)))
@@ -168,6 +175,22 @@ class DefaultAgent:
                                       step.execution_status, step.error, step.output_truncated, decision.reason, step.submission)
 
         result = AgentResult(AgentStatus.MAX_STEPS, last_content, tuple(steps), tuple(self.messages))
+        self._last_result = result
+        return result
+
+    def _cancelled_result(self, steps: list[AgentStep]) -> AgentResult:
+        message = "Task cancelled by request."
+        self.messages.append({
+            "role": "exit",
+            "content": message,
+            "extra": {"exit_status": AgentStatus.CANCELLED.value},
+        })
+        result = AgentResult(
+            AgentStatus.CANCELLED,
+            message,
+            tuple(steps),
+            tuple(self.messages),
+        )
         self._last_result = result
         return result
 

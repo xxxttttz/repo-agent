@@ -4,9 +4,18 @@ import copy
 import importlib
 
 from .. import Environment
-from .local import DangerousCommandPolicy, ExecutionResult, ExecutionStatus, LocalEnvironment
+from .docker import DockerEnvironment
+from .local import (
+    DangerousCommandPolicy,
+    ExecutionResult,
+    ExecutionStatus,
+    LocalEnvironment,
+)
 
-_ENVIRONMENT_MAPPING = {"local": "repo_agent.environments.local.LocalEnvironment"}
+_ENVIRONMENT_MAPPING = {
+    "docker": "repo_agent.environments.docker.DockerEnvironment",
+    "local": "repo_agent.environments.local.LocalEnvironment",
+}
 
 
 def get_environment_class(spec: str) -> type[Environment]:
@@ -24,4 +33,12 @@ def get_environment(config: dict | None = None, *, default_type: str = "local") 
     return get_environment_class(environment_class)(**values)
 
 
-__all__ = ["DangerousCommandPolicy", "ExecutionResult", "ExecutionStatus", "LocalEnvironment", "get_environment", "get_environment_class"]
+__all__ = [
+    "DangerousCommandPolicy",
+    "DockerEnvironment",
+    "ExecutionResult",
+    "ExecutionStatus",
+    "LocalEnvironment",
+    "get_environment",
+    "get_environment_class",
+]

@@ -72,6 +72,23 @@ REDIS_URL=redis://localhost:6379/0 \
 `queued`、`running`、Agent 的终态、trajectory，以及本次索引的
 `files/chunks/cache_hits/cache_misses` 指标。
 
+任务还支持取消和 SSE 状态订阅：
+
+```bash
+curl -N http://localhost:8000/tasks/TASK_ID/events
+curl -X POST http://localhost:8000/tasks/TASK_ID/cancel
+```
+
+SSE 会在任务快照变化时发送 `task` 事件，并在进入 `completed`、`max_steps`、`error`
+或 `cancelled` 后结束连接。取消是协作式的：排队任务会立即取消；运行中任务会在当前
+模型请求或 shell 命令结束后的步骤边界停止。
+
+配置 Redis 时，任务通过 Redis Streams consumer group 投递。worker 只有在任务进入终态
+后才会 ACK；进程异常留下的 pending 消息默认在 30 秒后由其他 worker 重新认领。执行中
+任务采用 at-least-once 语义，因此 workspace 中的修改操作最好保持幂等，并在更高安全
+要求下为每个任务使用独立 worktree。认领等待时间可通过
+`REPO_AGENT_QUEUE_RECLAIM_MS` 调整。
+
 ```bash
 docker compose up --build
 
@@ -120,6 +137,37 @@ REPO_AGENT_WORKSPACE_ROOT=/path/to/workspaces \
 REDIS_URL=redis://localhost:6379/0 repo-agent-api
 ```
 
+### 命令执行隔离
+
+HTTP 服务使用本地执行器时默认不会把服务进程的环境变量传给 Agent 命令，只提供安全的
+`PATH`、`HOME`、`TMPDIR` 和 locale。确实需要的变量可以显式加入逗号分隔的
+`REPO_AGENT_ENV_ALLOWLIST`；模型 provider 的 API key 通常不需要加入。
+
+也可以让每条 Agent 命令在一次性 Docker 容器中运行：
+
+```bash
+REPO_AGENT_ENVIRONMENT=docker \
+REPO_AGENT_DOCKER_IMAGE=python:3.13-slim \
+repo-agent-api
+```
+
+Docker 执行器默认使用 `--network none`、只读根文件系统、`no-new-privileges`、删除全部
+capabilities，并限制为 1 CPU、1 GiB 内存和 256 个 PID。目标 workspace 单独读写挂载到
+`/workspace`，临时目录使用受限 tmpfs。默认 `--pull=never`，镜像需要提前存在。
+可以使用以下环境变量调整服务端策略：
+
+- `REPO_AGENT_DOCKER_NETWORK`
+- `REPO_AGENT_DOCKER_MEMORY`
+- `REPO_AGENT_DOCKER_CPUS`
+- `REPO_AGENT_DOCKER_PIDS_LIMIT`
+- `REPO_AGENT_DOCKER_READ_ONLY`
+- `REPO_AGENT_DOCKER_PULL`
+
+Docker 模式要求 `repo-agent-api` 进程能够调用 Docker CLI。直接在宿主机启动 API 时最
+简单；若 API 自身运行在 Compose 容器中，需要自行提供 Docker CLI、daemon socket 和
+正确的宿主机 workspace 映射。挂载 Docker socket 等同于向 API 容器授予很高的宿主机
+权限，生产环境更适合使用独立的远程 sandbox worker。
+
 宿主机使用本地代理时，也可以只让 Redis 运行在 Compose 中，并在宿主机启动 API：
 
 ```bash
@@ -135,10 +183,14 @@ repo-agent-api
 
 此模式下仍完整经过 FastAPI 和 Redis，只是 API 进程直接复用宿主机代理。
 
-服务拒绝访问 `REPO_AGENT_WORKSPACE_ROOT` 之外的目录。已完成的 session 记忆由 Redis
-持久化，但任务状态当前仍保存在单个 API 进程内；进程重启后任务 id 会丢失，多副本和
-可靠队列可后续接入 Redis Streams/Celery。Agent 会在挂载的 workspace 执行命令，因此生产环境仍应使用专用
-容器或更强的沙箱，并配置认证和网络边界。
+服务拒绝访问 `REPO_AGENT_WORKSPACE_ROOT` 之外的目录。配置 Redis 后，任务快照默认保留
+7 天，因此 API 重启后仍可查询已知 task id；可通过 `REPO_AGENT_TASK_TTL` 调整保留时间。
+Redis Streams 会恢复未确认的 `queued` 或 `running` 任务，也允许多个 API 实例共享消费；
+同一 workspace 的执行由 Redis 租约锁串行化。锁会自动续约，只有持有匹配 token 的
+worker 才能释放；如果执行期间丢失租约，任务会停止并进入 `error`，避免在失去所有权后
+继续修改仓库。租约时长可通过 `REPO_AGENT_WORKSPACE_LOCK_LEASE_MS` 调整，默认 30 秒。
+未配置 Redis 时使用进程内 workspace 锁。Agent 仍会在挂载的 workspace 执行命令，
+因此生产环境应使用专用容器或更强的沙箱，并配置认证和网络边界。
 
 ## 安装
 

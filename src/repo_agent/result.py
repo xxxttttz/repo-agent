@@ -8,6 +8,7 @@ class AgentStatus(str, Enum):
     COMPLETED = "completed"
     MAX_STEPS = "max_steps"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)

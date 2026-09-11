@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agents import get_agent
@@ -31,6 +32,8 @@ class ServiceTask:
     max_steps: int = 5
     top_k: int = 5
     memory: tuple[MemoryTurn, ...] = ()
+    cancellation_check: Callable[[], bool] | None = None
+    environment_config: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,9 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
     )
     config = load_config()
     agent_config, environment_config, model_config = _component_configs(config, args)
+    environment_config.update(copy.deepcopy(spec.environment_config))
+    if environment_config.get("environment_class", "local") == "local":
+        environment_config.setdefault("inherit_env", False)
     environment_config["cwd"] = str(workspace)
 
     stats = IndexStats()
@@ -90,6 +96,7 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
         model,
         environment,
         {**agent_config, "component_config": component_config},
+        runtime={"cancellation_check": spec.cancellation_check},
     )
     agent.run(spec.task)
     return ServiceTaskResult(

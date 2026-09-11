@@ -16,7 +16,11 @@ with untrusted repositories or models.
 Do not place secrets in task text, trajectory files, model configuration, or a
 workspace the model can read. Environment variable names are supported for API
 authentication, but commands executed by the agent inherit the local process
-environment.
+environment only in direct CLI mode. The HTTP service uses an isolated command
+environment by default; variables must be explicitly allowlisted. The optional
+Docker environment adds process and network isolation, but access to a Docker
+daemon is itself highly privileged and must be protected as an administrative
+boundary.
 
 ## Reporting a vulnerability
 

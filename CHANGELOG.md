@@ -17,6 +17,16 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 - Docker and Compose deployment for the API and persistent Redis service.
 - Workspace-scoped Redis conversation memory with session APIs, bounded history,
   and sliding TTL.
+- Redis-backed task snapshots with a configurable retention period and local
+  fallback when Redis is unavailable.
+- Cooperative task cancellation and server-sent task status events.
+- Redis Streams task delivery with consumer acknowledgements, ownership
+  heartbeats, and automatic reclaiming of interrupted tasks.
+- Renewable Redis workspace leases with ownership-safe release, lease-loss
+  detection, and an in-process fallback.
+- A one-shot Docker execution environment with restrictive network, filesystem,
+  capability, CPU, memory, PID, and environment defaults.
+- Environment-variable isolation for commands launched by the HTTP service.
 
 ## [0.1.0] - 2026-08-31
 

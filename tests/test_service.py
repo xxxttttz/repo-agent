@@ -46,3 +46,13 @@ def test_service_task_injects_prior_session_memory(tmp_path):
     assert "Prior completed tasks in this session" in prompt
     assert "Choose a cache" in prompt
     assert "Use Redis." in prompt
+
+
+def test_service_local_environment_does_not_inherit_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_AGENT_TEST_SECRET", "must-not-leak")
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+
+    result = execute_task(ServiceTask("Inspect project", tmp_path, provider="mock", max_steps=2))
+
+    environment_config = result.trajectory["component_config"]["environment"]
+    assert environment_config["inherit_env"] is False

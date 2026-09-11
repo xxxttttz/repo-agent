@@ -43,7 +43,15 @@ class DangerousCommandPolicy:
 
 
 class LocalEnvironment:
-    def __init__(self, cwd: str, *, timeout: float = 30.0, max_output_size: int = 100_000):
+    def __init__(
+        self,
+        cwd: str,
+        *,
+        timeout: float = 30.0,
+        max_output_size: int = 100_000,
+        inherit_env: bool = True,
+        env_allowlist: list[str] | tuple[str, ...] = (),
+    ):
         self.cwd = cwd
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
@@ -51,6 +59,8 @@ class LocalEnvironment:
             raise ValueError("max_output_size must not be negative")
         self.timeout = timeout
         self.max_output_size = max_output_size
+        self.inherit_env = inherit_env
+        self.env_allowlist = tuple(env_allowlist)
 
     def get_template_vars(self, **kwargs) -> dict:
         variables = {"cwd": self.cwd, "timeout": self.timeout, "max_output_size": self.max_output_size}
@@ -71,8 +81,13 @@ class LocalEnvironment:
         if rejection is not None:
             return ExecutionResult(ExecutionStatus.REJECTED, error=rejection)
 
-        process = subprocess.Popen(command, shell=True, cwd=self.cwd, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=(os.name != "nt"))
+        try:
+            process = self._start_process(command)
+        except OSError as error:
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                error=f"Could not start command: {error}",
+            )
         captured = bytearray()
         truncated = False
         timed_out = False
@@ -123,7 +138,31 @@ class LocalEnvironment:
 
     def serialize(self) -> dict:
         return {"class": f"{type(self).__module__}.{type(self).__name__}", "cwd": self.cwd,
-                "timeout": self.timeout, "max_output_size": self.max_output_size}
+                "timeout": self.timeout, "max_output_size": self.max_output_size,
+                "inherit_env": self.inherit_env, "env_allowlist": list(self.env_allowlist)}
+
+    def _start_process(self, command: str) -> subprocess.Popen:
+        if self.inherit_env:
+            process_env = os.environ.copy()
+        else:
+            process_env = {
+                "HOME": "/tmp",
+                "LANG": "C.UTF-8",
+                "PATH": os.defpath,
+                "TMPDIR": "/tmp",
+            }
+        for name in self.env_allowlist:
+            if name in os.environ:
+                process_env[name] = os.environ[name]
+        return subprocess.Popen(
+            command,
+            shell=True,
+            cwd=self.cwd,
+            env=process_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=(os.name != "nt"),
+        )
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:
