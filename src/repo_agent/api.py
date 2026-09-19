@@ -30,8 +30,19 @@ from .workspace_lock import (
     WorkspaceLock,
     WorkspaceLockError,
 )
+from .worktree import (
+    TaskWorktree,
+    WorktreeError,
+    WorktreeManager,
+)
 
-TERMINAL_STATUSES = {"completed", "max_steps", "error", "cancelled"}
+TERMINAL_STATUSES = {
+    "completed",
+    "max_steps",
+    "error",
+    "cancelled",
+    "merge_conflict",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +91,9 @@ class TaskManager:
         workspace_lock: WorkspaceLock | None = None,
         workspace_lock_lease_ms: int = 30_000,
         environment_config: dict | None = None,
+        worktree_enabled: bool = True,
+        worktree_root: Path | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ):
         self.workspace_root = workspace_root.expanduser().resolve()
         self.cache = RedisChunkCache(redis_url) if redis_url else None
@@ -111,6 +125,19 @@ class TaskManager:
             if redis_url
             else InMemoryWorkspaceLock()
         )
+
+        self.worktree_enabled = worktree_enabled
+
+        self.worktree_manager = worktree_manager or WorktreeManager(
+            worktree_root
+            or Path(
+                os.getenv(
+                    "REPO_AGENT_WORKTREE_ROOT",
+                    "/tmp/repo-agent-worktrees",
+                )
+            )
+        )
+
         self.environment_config = dict(environment_config or {})
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
@@ -140,17 +167,35 @@ class TaskManager:
         task_id = uuid4().hex
         session_id = request.session_id or uuid4().hex
         record = {
-            "id": task_id,
-            "session_id": session_id,
-            "status": "queued",
-            "created_at": _now(),
-            "started_at": None,
-            "finished_at": None,
-            "result": None,
-            "error": None,
-            "index": None,
-            "memory_turns": None,
-            "cancel_requested": False,
+        "id": task_id,
+        "session_id": session_id,
+        "status": "queued",
+        "created_at": _now(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+        "index": None,
+        "memory_turns": None,
+        "cancel_requested": False,
+
+        # Original project path.
+        "source_workspace": str(workspace),
+
+        # Actual path used by Agent.
+        "execution_workspace": None,
+
+        # Worktree metadata. These stay None for non-Git workspaces.
+        "worktree_path": None,
+        "worktree_branch": None,
+        "worktree_source_branch": None,
+        "worktree_base_commit": None,
+        "worktree_commit": None,
+        "worktree_merged": None,
+        "worktree_merge_commit": None,
+        "worktree_merge_error": None,
+        "worktree_cleaned": None,
+        "worktree_cleanup_error": None,
         }
         cancel_event = threading.Event()
         with self._lock:
@@ -257,38 +302,92 @@ class TaskManager:
         if cancel_event.is_set():
             self._update(task_id, status="cancelled", finished_at=_now())
             return
-        lease = None
+
+        source_workspace = workspace
+        execution_workspace = source_workspace
+        execution_lease = None
+        task_worktree: TaskWorktree | None = None
+        final_commit: str | None = None
+        pending_update: dict | None = None
+
         try:
-            lease = self.workspace_lock.acquire(
-                workspace,
-                cancelled=lambda: self._is_cancelled(task_id, cancel_event),
+            repo_root = (
+                self.worktree_manager.repo_root(source_workspace)
+                if self.worktree_enabled
+                else None
             )
-            if lease is None:
-                self._update(task_id, status="cancelled", finished_at=_now())
-                return
+            if repo_root is not None:
+                create_lease = self.workspace_lock.acquire(
+                    repo_root,
+                    cancelled=lambda: self._is_cancelled(task_id, cancel_event),
+                )
+                if create_lease is None:
+                    self._update(task_id, status="cancelled", finished_at=_now())
+                    return
+                try:
+                    task_worktree = self.worktree_manager.create(source_workspace, task_id)
+                    if create_lease.lost:
+                        raise WorktreeError(
+                            "Workspace lock lease was lost while creating the task worktree"
+                        )
+                finally:
+                    try:
+                        create_lease.release()
+                    except WorkspaceLockError as error:
+                        raise WorktreeError(
+                            "Could not release workspace lock after worktree creation: "
+                            f"{error}"
+                        ) from error
+
+                execution_workspace = task_worktree.workspace
+                self._update(
+                    task_id,
+                    execution_workspace=str(execution_workspace),
+                    worktree_path=str(task_worktree.path),
+                    worktree_branch=task_worktree.branch,
+                    worktree_source_branch=task_worktree.source_branch,
+                    worktree_base_commit=task_worktree.base_commit,
+                    worktree_cleaned=False,
+                )
+            else:
+                execution_lease = self.workspace_lock.acquire(
+                    source_workspace,
+                    cancelled=lambda: self._is_cancelled(task_id, cancel_event),
+                )
+                if execution_lease is None:
+                    self._update(task_id, status="cancelled", finished_at=_now())
+                    return
+                self._update(task_id, execution_workspace=str(execution_workspace))
+
             record = self.get(task_id)
             if record is None or record["status"] in TERMINAL_STATUSES:
                 return
+
             self._update(task_id, status="running", started_at=_now())
-            memory = self.memory.load(session_id, workspace)
+            memory = self.memory.load(session_id, source_workspace)
             self._update(task_id, memory_turns=len(memory))
+
+            def cancellation_check() -> bool:
+                return self._is_cancelled(task_id, cancel_event) or (
+                    execution_lease is not None and execution_lease.lost
+                )
+
             output = execute_task(
                 ServiceTask(
                     task=request.task,
-                    workspace=workspace,
+                    workspace=execution_workspace,
                     provider=provider,
                     model=request.model or os.getenv("REPO_AGENT_MODEL"),
                     max_steps=request.max_steps,
                     top_k=request.top_k,
                     memory=tuple(memory),
-                    cancellation_check=lambda: (
-                        lease.lost or self._is_cancelled(task_id, cancel_event)
-                    ),
+                    cancellation_check=cancellation_check,
                     environment_config=self.environment_config,
                 ),
                 cache=self.cache,
             )
-            if lease.lost:
+
+            if execution_lease is not None and execution_lease.lost:
                 self._update(
                     task_id,
                     status="error",
@@ -296,41 +395,141 @@ class TaskManager:
                     finished_at=_now(),
                 )
                 return
-            if output.trajectory["status"] == "completed":
+
+            task_status = output.trajectory["status"]
+            if task_worktree is not None and task_status == "completed":
+                first_line = request.task.strip().splitlines()[0]
+                summary = first_line[:72] if first_line else task_id
+                final_commit = self.worktree_manager.commit_all(
+                    task_worktree,
+                    f"repo-agent: {summary}",
+                )
+                if final_commit is None:
+                    head = self.worktree_manager.head_commit(task_worktree)
+                    if head != task_worktree.base_commit:
+                        final_commit = head
+                self._update(
+                    task_id,
+                    worktree_commit=final_commit,
+                    worktree_merged=False if final_commit is not None else None,
+                )
+
+            if task_status == "completed":
                 self.memory.append(
                     session_id,
-                    workspace,
+                    source_workspace,
                     MemoryTurn(request.task, output.trajectory["answer"], _now()),
                 )
-            self._update(
-                task_id,
-                status=output.trajectory["status"],
-                result=output.trajectory,
-                index=output.index,
-                error=(
-                    output.trajectory["answer"]
-                    if output.trajectory["status"] == "error"
-                    else None
+
+            result_update = {
+                "status": task_status,
+                "result": output.trajectory,
+                "index": output.index,
+                "error": (
+                    output.trajectory["answer"] if task_status == "error" else None
                 ),
-                finished_at=_now(),
-            )
+                "finished_at": _now(),
+            }
+            if task_worktree is None:
+                self._update(task_id, **result_update)
+            else:
+                # A terminal task snapshot should include the final cleanup
+                # state, so publish it only after the finally block below.
+                pending_update = result_update
         except Exception as error:  # noqa: BLE001 - background failures become task state.
-            self._update(
-                task_id,
-                status="error",
-                error=f"{type(error).__name__}: {error}",
-                finished_at=_now(),
-            )
+            error_update = {
+                "status": "error",
+                "error": f"{type(error).__name__}: {error}",
+                "finished_at": _now(),
+            }
+            if task_worktree is None:
+                self._update(task_id, **error_update)
+            else:
+                pending_update = error_update
         finally:
-            if lease is not None:
+            if execution_lease is not None:
                 try:
-                    lease.release()
+                    execution_lease.release()
                 except WorkspaceLockError as error:
                     logger.warning("Workspace lock release failed: %s", error)
                     self._mark_lock_failure(task_id, str(error))
                 else:
-                    if lease.lost:
+                    if execution_lease.lost:
                         self._mark_lock_failure(task_id, "Workspace lock lease was lost")
+
+            if task_worktree is not None:
+                cleanup_lease = None
+                try:
+                    cleanup_lease = self.workspace_lock.acquire(
+                        task_worktree.repo_root,
+                        cancelled=lambda: False,
+                    )
+                    if cleanup_lease is None:
+                        raise WorktreeError(
+                            "Could not acquire repository lock for worktree cleanup"
+                        )
+
+                    merged = False
+                    if final_commit is not None:
+                        try:
+                            merge_commit = self.worktree_manager.merge_into_source(
+                                task_worktree
+                            )
+                        except WorktreeError as error:
+                            merge_error = f"{type(error).__name__}: {error}"
+                            self._update(
+                                task_id,
+                                worktree_merged=False,
+                                worktree_merge_error=merge_error,
+                            )
+                            if (
+                                pending_update is not None
+                                and pending_update.get("status") == "completed"
+                            ):
+                                pending_update["status"] = "merge_conflict"
+                                pending_update["error"] = merge_error
+                        else:
+                            merged = True
+                            self._update(
+                                task_id,
+                                worktree_merged=True,
+                                worktree_merge_commit=merge_commit,
+                                worktree_merge_error=None,
+                            )
+
+                    self.worktree_manager.remove(
+                        task_worktree,
+                        force=True,
+                        delete_branch=final_commit is None or merged,
+                    )
+                    self._update(
+                        task_id,
+                        worktree_cleaned=True,
+                        worktree_cleanup_error=None,
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve task result.
+                    logger.warning(
+                        "Task worktree cleanup failed for %s: %s",
+                        task_id,
+                        error,
+                    )
+                    self._update(
+                        task_id,
+                        worktree_cleaned=False,
+                        worktree_cleanup_error=f"{type(error).__name__}: {error}",
+                    )
+                finally:
+                    if cleanup_lease is not None:
+                        try:
+                            cleanup_lease.release()
+                        except WorkspaceLockError as error:
+                            logger.warning(
+                                "Worktree cleanup lock release failed: %s",
+                                error,
+                            )
+
+        if pending_update is not None:
+            self._update(task_id, **pending_update)
 
     def _mark_lock_failure(self, task_id: str, message: str) -> None:
         record = self.get(task_id)
