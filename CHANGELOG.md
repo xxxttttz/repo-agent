@@ -8,6 +8,32 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Read-only, commit/hash-bound candidate patch and minimal review-evidence
+  downloads, with stored-byte checksum validation, safe attachment filenames,
+  authentication and no-store/nosniff headers. Console downloads use Bearer
+  headers rather than tokenized URLs, with stale-view protection and optional
+  Web Crypto patch checksum verification. Exports never approve or push changes.
+
+- Authenticated cursor-paginated task summaries and console history, with
+  status/kind/workspace filters, workspace-root boundaries, a bounded Redis
+  history index, expiry pruning, batch metadata reads, and explicit degraded
+  local-cache reporting. Lists never include logs, trajectories or full patches.
+
+- `repo-agent-repair-eval` grades the production repair controller on fresh
+  Git fixtures, with reproducible public CI failures, protected original tests,
+  independent behavioral acceptance, source-mutation detection, repetitions,
+  retained task/trajectory/patch artifacts, and no automatic approvals.
+
+- Internal Python CI repair console and profile-based `/repairs` API, with
+  server-owned repository/check/scope/budget policy, failure reproduction before
+  model execution, independent final verification, and retained candidate diffs.
+- Exact commit/diff-hash-bound approval and rejection APIs. Approval reruns
+  checks and validates clean candidate/source state before fast-forwarding;
+  rejected and stale candidates never auto-merge and remain available for review.
+- Optional shared Bearer authentication, loopback listener/Compose port defaults,
+  and a per-process pending-task limit. Repair mode disables general task creation
+  by default so callers cannot bypass profile policy.
+
 - Runner-generated handoff receipts on every terminal status, kept separate
   from model prose in CLI, trajectory, API and evaluation results. Receipts
   distinguish absent/unrun checks and accepted verification, with successful
@@ -57,6 +83,12 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 - A one-shot Docker execution environment with restrictive network, filesystem,
   capability, CPU, memory, PID, and environment defaults.
 - Environment-variable isolation for commands launched by the HTTP service.
+
+### Changed
+
+- Git HTTP tasks now default to manual review instead of automatic merge.
+  Explicit `delivery_mode: "auto_merge"` retains the legacy behavior; repair
+  requests always require review. Reviewed worktrees are retained after decisions.
 
 ### Fixed
 

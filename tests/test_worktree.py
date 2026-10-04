@@ -163,7 +163,8 @@ def test_task_manager_executes_git_task_in_worktree(tmp_path, monkeypatch):
     )
     accepted = manager.submit(
         TaskRequest(task="Generate a file", workspace="project", provider="mock",
-                    verification_commands=["test -d src"], protected_paths=["src/example.py"])
+                    verification_commands=["test -d src"], protected_paths=["src/example.py"],
+                    delivery_mode="auto_merge")
     )
 
     for _ in range(300):

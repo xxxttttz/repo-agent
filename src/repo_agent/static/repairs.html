@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Repo Agent · CI 修复工单台</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,sans-serif;color:#19302b;background:#f4f6f3}*{box-sizing:border-box}body{margin:0}header{background:#173f35;color:white;padding:28px max(24px,calc((100vw - 1200px)/2))}h1{font-size:26px;margin:0 0 8px}header p{margin:0;color:#c2d9cc}main{max-width:1200px;margin:24px auto;padding:0 20px;display:grid;grid-template-columns:350px 1fr;gap:20px}.card{background:white;border:1px solid #dce4dd;border-radius:12px;padding:22px}h2{font-size:18px;margin:0 0 18px}label{display:block;font-size:14px;font-weight:600;margin:16px 0 7px}input,select,textarea{width:100%;padding:10px;border:1px solid #b9c9be;border-radius:6px;font:inherit}textarea{resize:vertical}button{border:0;border-radius:6px;background:#236b50;color:white;padding:11px 16px;font:inherit;cursor:pointer;margin:14px 6px 0 0}button.secondary{background:#e8eee9;color:#243f30}button:disabled{opacity:.5;cursor:default}.note{font-size:13px;line-height:1.6;color:#586c5e}.state{padding:9px 14px;background:#edf3ee;border-radius:6px;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8f5;padding:14px;border:1px solid #e1e8de;border-radius:6px;font-size:12px;max-height:400px;overflow:auto}details{margin-top:18px}summary{cursor:pointer;font-weight:600}#notice{white-space:pre-wrap;color:#903922;margin-top:15px}#review{border-top:1px solid #dce4dd;margin-top:22px;padding-top:10px}#review[hidden]{display:none}@media(max-width:800px){main{grid-template-columns:1fr}}
+</style>
+<style>
+.history{grid-column:1/-1}.history-controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.history-controls label{margin:0;flex:1;min-width:150px}.history-controls select{margin-top:7px}.history-controls button{margin:0}#history-list{list-style:none;padding:0;margin:18px 0 0}.history-row{display:flex;align-items:center;gap:16px;padding:14px 0;border-top:1px solid #e1e8de}.history-title{margin:0;text-align:left;flex:1;min-width:0;background:#edf3ee;color:#19302b;overflow-wrap:anywhere}.history-meta{flex:1;min-width:0;overflow-wrap:anywhere}.history-state{max-width:200px;font-size:13px}#history-note{white-space:pre-wrap}
+@media(max-width:800px){.history-row{flex-wrap:wrap}.history-title{flex-basis:100%}.history-controls button{margin-top:8px}}
+</style>
+</head>
+<body>
+<header><h1>CI 修复工单台</h1><p>复现失败 → 小范围修复 → 验证候选补丁 → 人工决定合入</p></header>
+<main>
+<section class="card history">
+<h2>工单历史与待审批</h2>
+<div class="history-controls">
+<label for="history-status">状态<select id="history-status"><option value="">全部状态</option><option value="awaiting_review">待人工审批</option><option value="queued">排队中</option><option value="running">执行中</option><option value="approved">已批准</option><option value="rejected">已拒绝</option><option value="error">执行失败</option><option value="max_steps">预算耗尽</option><option value="cancelled">已取消</option><option value="not_reproduced">未复现</option><option value="completed">执行完成</option><option value="merge_conflict">合并冲突</option></select></label>
+<label for="history-kind">类型<select id="history-kind"><option value="ci_repair">修复工单</option><option value="task">通用任务</option><option value="">全部类型</option></select></label>
+<label for="history-workspace">仓库<select id="history-workspace"><option value="">所有已授权仓库</option></select></label>
+<button id="history-refresh" class="secondary">刷新列表</button>
+</div>
+<p id="history-note" class="note" role="status">填写访问令牌并加载模板后，显示可查询的工单摘要。</p>
+<ul id="history-list"></ul><button id="history-more" class="secondary" hidden>加载更早工单</button>
+</section>
+<section class="card">
+<h2>创建修复工单</h2>
+<label for="token">访问令牌</label><input id="token" type="password" autocomplete="off" placeholder="服务配置了认证时填写">
+<button id="connect" class="secondary">加载修复模板</button>
+<label for="profile">服务端模板</label><select id="profile"><option value="">尚未加载</option></select>
+<p id="policy" class="note">仓库、验收命令和修改范围由管理员配置。</p>
+<form id="submit-form">
+<label for="task">修复目标</label><textarea id="task" rows="3" maxlength="4000" required placeholder="修复分页边界错误，并增加回归测试"></textarea>
+<label for="failure-log">CI 失败日志</label><textarea id="failure-log" rows="9" maxlength="40000" required placeholder="粘贴失败测试和错误栈；请先移除日志中的凭据"></textarea>
+<button id="submit" type="submit">创建工单</button>
+</form>
+<p class="note">模型不会自动合入。日志和仓库内容可能发给所配置的模型服务。仅用于受信任的内部环境，不是多租户沙箱。</p>
+<label for="task-id">查看已有工单</label><input id="task-id" placeholder="粘贴 task ID"><button id="load" class="secondary">查看</button>
+</section>
+<section class="card">
+<h2>执行与审查</h2><div id="state" class="state">等待工单</div><p id="meta" class="note"></p><div id="notice" role="alert"></div>
+<details open><summary>模型总结</summary><pre id="answer">创建或加载工单后显示结果。</pre></details>
+<details><summary>失败复现</summary><pre id="baseline">尚未运行</pre></details>
+<details><summary>最终验证与范围检查</summary><pre id="checks">尚未运行</pre></details>
+<details><summary>执行器回执（不为模型文字背书）</summary><pre id="handoff">暂无</pre></details>
+<details open><summary>候选 diff</summary><pre id="diff">暂无候选补丁</pre></details>
+<section id="export" hidden>
+<p class="note">导出已保存的精确候选与验证摘要，不会重新验收或合入。摘要不含原始日志、命令和模型回答；补丁本身不脱敏，请检查后再分享。</p>
+<button id="export-patch" class="secondary">下载 patch</button><button id="export-report" class="secondary">下载验证摘要</button>
+</section>
+<section id="review" hidden>
+<p class="note">请审查完整 diff 和验证结果。批准时会重新检查候选、源版本并运行验收，只合入当前展示的 commit；拒绝保留工作区。</p>
+<label for="reason">审查说明</label><textarea id="reason" rows="2" maxlength="2000"></textarea>
+<button id="approve">批准并合入</button><button id="reject" class="secondary">拒绝候选</button>
+</section>
+<button id="cancel" class="secondary" hidden>取消执行</button>
+</section>
+</main>
+<script>
+const el=id=>document.getElementById(id);
+let profiles=[],current=null,timer=null,watchVersion=0;
+let historyRows=[],historyCursor=null,historyVersion=0;
+const terminal=new Set(['completed','awaiting_review','approved','rejected','not_reproduced','error','cancelled','max_steps','merge_conflict']);
+const labels={queued:'排队中',running:'执行中',awaiting_review:'等待人工审查',approved:'已批准并合入',rejected:'已拒绝（保留工作区）',not_reproduced:'未复现失败，未启动模型修复',error:'执行失败',cancelled:'已取消',max_steps:'预算耗尽，未完成',completed:'执行完成',merge_conflict:'合并冲突'};
+async function api(path,method='GET',body){
+ const headers={};const token=el('token').value;if(token)headers.Authorization='Bearer '+token;
+ if(body)headers['Content-Type']='application/json';
+ const response=await fetch(path,{method,headers,body:body?JSON.stringify(body):undefined});
+ const data=await response.json();if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));return data;
+}
+function notice(error){el('notice').textContent=error?String(error.message||error):'';}
+function showPolicy(){const p=profiles.find(p=>p.id===el('profile').value);el('policy').textContent=p?`仓库：${p.workspace}\n允许修改：${p.allowed_paths.join(', ')}\n模型步数上限：${p.max_steps}\n验收：${p.verification_commands.join('; ')}`:'管理员尚未配置修复模板。';}
+async function connect(){try{notice('');const data=await api('/repair-profiles');profiles=data.profiles;el('profile').replaceChildren();for(const p of profiles){const option=document.createElement('option');option.value=p.id;option.textContent=p.title+' · '+p.id;el('profile').append(option);}if(!profiles.length){const option=document.createElement('option');option.textContent='暂无模板';option.value='';el('profile').append(option);}showPolicy();populateHistoryWorkspaces();await loadHistory();}catch(error){notice(error);}}
+function populateHistoryWorkspaces(){
+ const selected=el('history-workspace').value;
+ el('history-workspace').replaceChildren();
+ for(const workspace of ['',...new Set(profiles.map(profile=>profile.workspace))]){
+  const option=document.createElement('option');option.value=workspace;option.textContent=workspace||'所有已授权仓库';el('history-workspace').append(option);
+ }
+ if([...el('history-workspace').options].some(option=>option.value===selected))el('history-workspace').value=selected;
+}
+function renderHistory(){
+ el('history-list').replaceChildren();
+ for(const record of historyRows){
+  const row=document.createElement('li');row.className='history-row';
+  const title=document.createElement('button');title.type='button';title.className='history-title';title.textContent=record.task||record.id;title.onclick=()=>watch(record.id);
+  const state=document.createElement('span');state.className='state history-state';state.textContent=labels[record.status]||record.status;
+  const meta=document.createElement('small');meta.className='note history-meta';const date=new Date(record.created_at);const time=record.created_at&&!Number.isNaN(date.getTime())?date.toLocaleString():'时间未知';meta.textContent=`${record.source_workspace||'仓库未知'} · ${time} · ${record.id}`;
+  row.append(title,state,meta);el('history-list').append(row);
+ }
+ el('history-more').hidden=!historyCursor;
+}
+async function loadHistory(reset=true){
+ if(reset){historyVersion++;historyCursor=null;historyRows=[];renderHistory();}
+ else if(!historyCursor)return;
+ const version=historyVersion;const query=new URLSearchParams({limit:'20'});
+ for(const [key,id] of [['status','history-status'],['kind','history-kind'],['workspace','history-workspace']]){const value=el(id).value;if(value)query.set(key,value);}
+ if(!reset)query.set('cursor',historyCursor);
+ el('history-refresh').disabled=el('history-more').disabled=true;el('history-note').textContent='正在加载工单摘要…';
+ try{
+  const page=await api('/tasks?'+query.toString());if(version!==historyVersion)return;
+  const rows=new Map(historyRows.map(row=>[row.id,row]));for(const row of page.tasks)rows.set(row.id,row);historyRows=[...rows.values()];historyCursor=page.next_cursor;renderHistory();
+  const summary=historyRows.length?`已显示 ${historyRows.length} 项工单。`:historyCursor?'这批没有匹配工单，可以继续加载更早记录。':'暂无符合条件的工单。';
+  el('history-note').textContent=(page.degraded?'Redis 不可用：仅显示本机缓存，不代表完整历史。\n':'')+summary+` 列表最多覆盖最近 ${page.history_limit} 项创建记录；状态变化后可刷新。`;
+ }catch(error){if(version===historyVersion)el('history-note').textContent='历史加载失败：'+error.message;}
+ finally{if(version===historyVersion)el('history-refresh').disabled=el('history-more').disabled=false;}
+}
+function render(record){current=record;el('state').textContent=labels[record.status]||record.status;el('meta').textContent=`工单 ${record.id} · ${record.delivery_mode||'review'} · ${record.worktree_branch||'等待工作区'}`+(record.candidate?` · 候选 ${record.candidate.commit}`:'');el('task-id').value=record.id;el('answer').textContent=record.result?.answer||'尚无模型总结';el('baseline').textContent=JSON.stringify(record.baseline||'尚未运行',null,2);el('checks').textContent=JSON.stringify({final:record.post_verification,scope:record.scope_review,approval:record.approval_verification,review:record.review},null,2);el('handoff').textContent=JSON.stringify(record.result?.handoff||'暂无',null,2);el('diff').textContent=record.candidate?.diff||'暂无候选补丁';el('review').hidden=record.status!=='awaiting_review'||!record.candidate;el('export').hidden=!record.candidate||!['awaiting_review','approved','rejected'].includes(record.status);el('cancel').hidden=terminal.has(record.status);notice(record.error||'');}
+async function poll(id,version){try{const record=await api('/tasks/'+encodeURIComponent(id));if(version!==watchVersion)return;const priorStatus=current?.status;render(record);if(priorStatus&&priorStatus!==record.status)loadHistory();if(!terminal.has(record.status))timer=setTimeout(()=>poll(id,version),1500);}catch(error){if(version===watchVersion)notice(error);}}
+async function watch(id){clearTimeout(timer);const version=++watchVersion;current=null;el('review').hidden=el('cancel').hidden=el('export').hidden=true;await poll(id,version);}
+el('connect').onclick=connect;el('profile').onchange=showPolicy;
+el('load').onclick=()=>watch(el('task-id').value.trim());
+el('history-refresh').onclick=()=>loadHistory();el('history-more').onclick=()=>loadHistory(false);
+for(const id of ['history-status','history-kind','history-workspace'])el(id).onchange=()=>loadHistory();
+el('submit-form').onsubmit=async event=>{event.preventDefault();el('submit').disabled=true;try{notice('');const record=await api('/repairs','POST',{profile:el('profile').value,task:el('task').value,failure_log:el('failure-log').value});await watch(record.id);await loadHistory();}catch(error){notice(error);}finally{el('submit').disabled=false;}};
+async function decide(approve){if(!current?.candidate)return;if(approve&&!confirm('确认合入当前已审查的候选补丁？'))return;const version=watchVersion;el('approve').disabled=el('reject').disabled=true;try{const c=current.candidate;const record=await api('/tasks/'+current.id+(approve?'/approve':'/reject'),'POST',{commit:c.commit,diff_sha256:c.diff_sha256,reason:el('reason').value});if(version===watchVersion){render(record);await loadHistory();}}catch(error){if(version===watchVersion)notice(error);}finally{el('approve').disabled=el('reject').disabled=false;}}
+el('approve').onclick=()=>decide(true);el('reject').onclick=()=>decide(false);
+async function downloadCandidate(patch){
+ if(!current?.candidate)return;
+ const id=current.id,version=watchVersion,c=current.candidate;
+ const query=new URLSearchParams({commit:c.commit,diff_sha256:c.diff_sha256});
+ const headers={};const token=el('token').value;if(token)headers.Authorization='Bearer '+token;
+ el('export-patch').disabled=el('export-report').disabled=true;
+ try{
+  const response=await fetch('/tasks/'+encodeURIComponent(id)+(patch?'/candidate.patch':'/candidate-report.json')+'?'+query.toString(),{headers});
+  if(!response.ok){const error=await response.json();throw new Error(typeof error.detail==='string'?error.detail:JSON.stringify(error.detail));}
+  if(response.headers.get('X-Repo-Agent-Commit')!==c.commit||response.headers.get('X-Repo-Agent-Diff-SHA256')!==c.diff_sha256)throw new Error('导出候选身份不匹配，请重新加载工单。');
+  const bytes=await response.arrayBuffer();
+  if(patch&&globalThis.crypto?.subtle){const digest=await globalThis.crypto.subtle.digest('SHA-256',bytes);const hash=[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('');if(hash!==c.diff_sha256)throw new Error('导出补丁 SHA-256 不匹配，未下载。');}
+  if(version!==watchVersion)return;
+  const url=URL.createObjectURL(new Blob([bytes],{type:patch?'application/octet-stream':'application/json'}));
+  const anchor=document.createElement('a');anchor.href=url;anchor.download=`repo-agent-${c.commit.slice(0,12)}.${patch?'patch':'review.json'}`;
+  document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);notice('');
+ }catch(error){if(version===watchVersion)notice(error);}
+ finally{el('export-patch').disabled=el('export-report').disabled=false;}
+}
+el('export-patch').onclick=()=>downloadCandidate(true);el('export-report').onclick=()=>downloadCandidate(false);
+el('cancel').onclick=async()=>{if(!current)return;const id=current.id,version=watchVersion;try{await api('/tasks/'+id+'/cancel','POST');if(version===watchVersion)await watch(id);await loadHistory();}catch(error){if(version===watchVersion)notice(error);}};
+connect();
+</script>
+</body>
+</html>

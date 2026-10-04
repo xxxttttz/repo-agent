@@ -155,6 +155,44 @@ class WorktreeManager:
     def head_commit(self, worktree: TaskWorktree) -> str:
         return self._git(worktree.path, "rev-parse", "HEAD")
 
+    def changed_paths(self, worktree: TaskWorktree, commit: str | None = None) -> list[str]:
+        args = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", worktree.base_commit]
+        if commit:
+            args.append(commit)
+        tracked = self._run_git(worktree.path, *args, "--").stdout.split("\0")
+        untracked = [] if commit else self._run_git(
+            worktree.path, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0")
+        return sorted({path for path in tracked + untracked if path})
+
+    def candidate(self, worktree: TaskWorktree, commit: str) -> dict:
+        patch = self._run_git(worktree.path, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+                              "--no-renames", worktree.base_commit, commit, "--").stdout
+        if len(patch.encode("utf-8")) > 1_000_000:
+            raise WorktreeError("Candidate diff exceeds the 1 MB review limit")
+        return {"base_commit": worktree.base_commit, "commit": commit,
+                "changed_paths": self.changed_paths(worktree, commit), "diff": patch,
+                "diff_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest()}
+
+    def assert_reviewable(self, worktree: TaskWorktree, commit: str) -> None:
+        if self.head_commit(worktree) != commit or self._git(worktree.path, "rev-parse", worktree.branch) != commit:
+            raise WorktreeError("Candidate commit changed; generate and review a new candidate")
+        if self._git(worktree.path, "symbolic-ref", "--short", "HEAD") != worktree.branch:
+            raise WorktreeError("Candidate branch changed")
+        if self._git(worktree.path, "status", "--porcelain", "--untracked-files=all"):
+            raise WorktreeError("Candidate workspace changed after review")
+        if self._git(worktree.repo_root, "rev-parse", "HEAD") != worktree.base_commit:
+            raise WorktreeError("Source commit changed; repair must be rerun against the new base")
+        if self._git(worktree.repo_root, "symbolic-ref", "--short", "HEAD") != worktree.source_branch:
+            raise WorktreeError("Source branch changed")
+        if self._git(worktree.repo_root, "status", "--porcelain", "--untracked-files=all"):
+            raise WorktreeError("Source workspace has uncommitted changes")
+
+    def approve_candidate(self, worktree: TaskWorktree, commit: str) -> str:
+        """Fast-forward the exact reviewed commit; never reset on failure."""
+        self.assert_reviewable(worktree, commit)
+        self._git(worktree.repo_root, "merge", "--ff-only", commit)
+        return self._git(worktree.repo_root, "rev-parse", "HEAD")
+
     def commit_all(self, worktree: TaskWorktree, message: str) -> str | None:
         """Commit all tracked and untracked changes, returning the new commit."""
         self._git(worktree.path, "add", "--all")

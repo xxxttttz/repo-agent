@@ -8,6 +8,11 @@ benchmark of production coding performance.
 The first real-model iteration and its limitations are recorded in
 [第一轮真实模型评测记录](live-evaluation.md).
 
+For the profile-based CI repair controller (Git worktrees, reproduction,
+scope checks and pending review), use the separate
+[repair workflow evaluation](repair-evaluation.md). The core suite below
+still evaluates the agent directly and does not exercise that service path.
+
 | Case | Capability | Independent acceptance |
 | --- | --- | --- |
 | `pagination-boundary` | Single-file bug repair | Page boundaries, empty inputs, invalid arguments |

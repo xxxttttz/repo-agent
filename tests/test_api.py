@@ -151,3 +151,67 @@ async def test_cancel_running_task_at_step_boundary(tmp_path, monkeypatch):
     repeated = app.state.task_manager.cancel(task_id)
     assert repeated["status"] == "cancelled"
     app.state.task_manager.close()
+
+
+@pytest.mark.anyio
+async def test_authenticated_task_history_filters_pages_and_omits_large_sensitive_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPO_AGENT_API_TOKEN", "history-access")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REPO_AGENT_REPAIR_PROFILES", raising=False)
+    (tmp_path / "project").mkdir()
+    (tmp_path / "other").mkdir()
+    app = create_app()
+    store = app.state.task_manager.task_store
+    for identifier, second, state, kind, workspace in [
+        ("a", 1, "approved", "ci_repair", tmp_path / "project"),
+        ("b", 2, "awaiting_review", "ci_repair", tmp_path / "project"),
+        ("c", 3, "queued", "task", tmp_path / "other"),
+        ("d", 4, "awaiting_review", "ci_repair", tmp_path.parent / "outside"),
+    ]:
+        store.put({"id": identifier * 32, "task": f"Fix {identifier}", "status": state, "kind": kind,
+                   "created_at": f"2026-10-04T10:00:{second:02}.000000+00:00", "source_workspace": str(workspace),
+                   "failure_log": "private diagnostic", "candidate": {"diff": "full patch"},
+                   "result": {"messages": ["private trajectory"]}, "repair_profile": {"verification_commands": ["secret"]}})
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get("/tasks")).status_code == 401
+            client.headers["Authorization"] = "Bearer history-access"
+            response = await client.get("/tasks", params={"limit": 2})
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            first = response.json()
+            assert [row["id"] for row in first["tasks"]] == ["c" * 32, "b" * 32]
+            assert all(not any(key in row for key in ["failure_log", "result", "candidate", "repair_profile"])
+                       for row in first["tasks"])
+            assert not first["degraded"]
+            second = (await client.get("/tasks", params={"limit": 2, "cursor": first["next_cursor"]})).json()
+            assert [row["id"] for row in second["tasks"]] == ["a" * 32]
+            assert second["next_cursor"] is None
+            pending = (await client.get("/tasks", params={"status": "awaiting_review", "kind": "ci_repair"})).json()
+            assert [row["id"] for row in pending["tasks"]] == ["b" * 32]
+            project = (await client.get("/tasks", params={"workspace": "project"})).json()
+            assert [row["id"] for row in project["tasks"]] == ["b" * 32, "a" * 32]
+            general = (await client.get("/tasks", params={"kind": "task"})).json()
+            assert [row["id"] for row in general["tasks"]] == ["c" * 32]
+    finally:
+        app.state.task_manager.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("params, code", [
+    ({"limit": 0}, 422), ({"limit": 101}, 422), ({"cursor": "malformed"}, 400),
+    ({"cursor": "A" * 257}, 422), ({"status": "made_up"}, 400),
+    ({"kind": "made_up"}, 422), ({"workspace": ".."}, 400),
+])
+async def test_task_history_rejects_invalid_queries(tmp_path, monkeypatch, params, code):
+    monkeypatch.setenv("REPO_AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REPO_AGENT_API_TOKEN", raising=False)
+    monkeypatch.delenv("REPO_AGENT_REPAIR_PROFILES", raising=False)
+    app = create_app()
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get("/tasks", params=params)).status_code == code
+    finally:
+        app.state.task_manager.close()

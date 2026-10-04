@@ -6,6 +6,20 @@ Repo Agent 是一个精简的本地 coding agent：模型逐轮提出 shell 命�
 
 它适合用作本地仓库检查、轻量代码修改和 Agent 控制流实验。项目保持较小的依赖集合，不要求 Pydantic、Typer 或在线服务才能运行 Mock 流程。
 
+## 场景入口：Python CI 修复工单台
+
+HTTP 服务首页提供内部修复控制台：选择管理员配置的仓库模板、粘贴失败日志，执行器先复现失败，再在独立 Git worktree 中尝试修复、重新验收并生成候选 diff。通过检查的补丁进入 `awaiting_review`，人工批准后才会将精确的候选 commit 快进合入源仓库；拒绝会保留工作区。
+
+首页也提供工单历史和待审批筛选，可按状态、任务类型、仓库分页查询；列表仅显示摘要，点击后再加载日志、轨迹与补丁。配置 Redis 时新增工单的历史索引可跨重启保留，Redis 不可用时明确提示列表只来自本机缓存。
+
+候选支持下载原始 patch 和最小化验证摘要，均绑定当前 commit 与 diff SHA-256，不触发新验收、审批或远程写入。摘要不包含日志、命令、模型回答和宿主机路径；补丁代码本身不脱敏，分享前须审查。见 [候选导出说明](docs/ci-repair.md#候选补丁与验证摘要导出)。
+
+模板固定模型、复现/验收命令、允许修改范围、保护文件和执行预算，请求者不能覆盖这些策略。配置模板后，通用 `POST /tasks` 默认禁用。服务支持共享 Bearer 令牌，默认只监听本机；这是受信任内部团队的 Alpha 工具，不是多租户执行沙箱。
+
+启动步骤、模板示例、审批 API 和部署限制见 [CI 修复工单台指南](docs/ci-repair.md)。示例配置在 [config/repair-profiles.example.yaml](config/repair-profiles.example.yaml)；默认 `mock` 仅用于接线演示，不会自动修复真实缺陷。
+
+`repo-agent-repair-eval` 可在内置 Git 测试仓库中重复验证工单控制流程，单独评分候选补丁并检查源仓库未被修改；不会自动批准或操作远程仓库。运行方式见 [修复闭环评测](docs/repair-evaluation.md)。
+
 ## 设计边界
 
 组件边界参考了 mini-swe-agent 的组织方式，但实现和文档是本项目自己的：
@@ -72,7 +86,9 @@ repo-agent --workspace ./my-project --max-steps 20 \
 
 此检查只控制是否接受完成，不拦截 shell 写入、不自动回滚，也不检测修改后又恢复的临时行为。符号链接只比较链接目标，不读取链接指向的文件内容。保护文件由调用者显式选择，不会根据自然语言自动推断。
 
-Git workspace 的 HTTP 任务默认在独立 worktree 中执行；成功任务沿用自动提交与合并流程。耗尽步数、取消或异常退出的任务保留 worktree 和分支，`worktree_cleaned` 为 `false`，可从任务响应的 `worktree_path` 找回未提交修改。保留的 worktree 需要人工检查和清理，目前不自动回收，也不自动续跑 HTTP 任务。
+Git workspace 的 HTTP 任务默认在独立 worktree 中执行，`delivery_mode` 默认为 `review`；生成补丁后等待人工审批，不自动合并。没有补丁的普通调查任务仍可直接 `completed`。显式设置 `delivery_mode: "auto_merge"` 可保留旧的自动提交、合并和清理行为，不适用于修复工单。非 Git workspace 或关闭 worktree 的普通任务仍直接修改原目录，不具备此审批边界。
+
+审查模式，以及耗尽步数、取消或异常退出的任务保留 worktree 和分支，`worktree_cleaned` 为 `false`，可从任务响应的 `worktree_path` 找回修改。保留的 worktree 需要人工检查和清理，目前不自动回收，也不自动续跑 HTTP 任务。
 
 ### 本地源码检索
 
@@ -119,6 +135,11 @@ REDIS_URL=redis://localhost:6379/0 \
 `queued`、`running`、Agent 的终态、trajectory，以及本次索引的
 `files/chunks/cache_hits/cache_misses` 指标。
 
+`GET /tasks` 返回工单摘要列表，支持 `status`、`kind`、`workspace`、`limit` 和
+`cursor`。默认每页 20 项，最多 100 项，按创建时间和 id 倒序排列；列表最多覆盖最近
+10,000 项创建记录，不是永久审计账本。使用响应中的 `next_cursor` 继续相同筛选，直到
+为 `null`。详情仍通过 `GET /tasks/{id}` 查询，参见 [历史查询说明](docs/ci-repair.md#历史列表与筛选)。
+
 任务还支持取消和 SSE 状态订阅：
 
 ```bash
@@ -126,8 +147,9 @@ curl -N http://localhost:8000/tasks/TASK_ID/events
 curl -X POST http://localhost:8000/tasks/TASK_ID/cancel
 ```
 
-SSE 会在任务快照变化时发送 `task` 事件，并在进入 `completed`、`max_steps`、`error`
-或 `cancelled` 后结束连接。取消是协作式的：排队任务会立即取消；运行中任务会在当前
+SSE 会在任务快照变化时发送 `task` 事件，并在进入执行终态（包括 `awaiting_review`、
+`not_reproduced`、`approved`、`rejected`）后结束连接。之后的审查决定需重新查询任务。
+取消是协作式的：排队任务会立即取消；运行中任务会在当前
 模型请求或 shell 命令结束后的步骤边界停止。
 
 配置 Redis 时，任务通过 Redis Streams consumer group 投递。worker 只有在任务进入终态
@@ -183,6 +205,11 @@ python -m pip install -e '.[service]'
 REPO_AGENT_WORKSPACE_ROOT=/path/to/workspaces \
 REDIS_URL=redis://localhost:6379/0 repo-agent-api
 ```
+
+默认监听 `127.0.0.1:8000`，Compose 端口也只绑定宿主机回环地址。设置
+`REPO_AGENT_API_TOKEN` 后，除公开的首页和 `/health` 外，接口均要求
+`Authorization: Bearer TOKEN`（上述 curl 示例也需要此请求头）。公开监听前必须配置
+令牌、TLS 和网络访问控制；认证是共享操作员令牌，不提供用户身份或角色权限。
 
 ### 命令执行隔离
 

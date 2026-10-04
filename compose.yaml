@@ -6,6 +6,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       REPO_AGENT_PROVIDER: ${REPO_AGENT_PROVIDER:-mock}
       REPO_AGENT_MODEL: ${REPO_AGENT_MODEL:-}
+      REPO_AGENT_API_TOKEN: ${REPO_AGENT_API_TOKEN:-}
+      REPO_AGENT_REPAIR_PROFILES: ${REPO_AGENT_REPAIR_PROFILES:-}
       REPO_AGENT_SESSION_TTL: ${REPO_AGENT_SESSION_TTL:-86400}
       REPO_AGENT_SESSION_MAX_TURNS: ${REPO_AGENT_SESSION_MAX_TURNS:-8}
       REPO_AGENT_TASK_TTL: ${REPO_AGENT_TASK_TTL:-604800}
@@ -24,7 +26,7 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/workspace/project
     depends_on:

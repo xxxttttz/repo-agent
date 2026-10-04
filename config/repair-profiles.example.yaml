@@ -1,0 +1,22 @@
+# Trusted administrator configuration, never accepted from a repair requester.
+# Run in a pre-provisioned environment with dependencies already installed.
+profiles:
+  - id: python-unittest
+    title: Python 单元测试修复
+    workspace: project
+    provider: mock # Change to an available provider/model for actual repairs.
+    reproduce_commands:
+      - python3 -B -m unittest discover -s tests
+    verification_commands:
+      - python3 -B -m unittest discover -s tests
+      - git diff --check
+    allowed_paths:
+      - src/*.py
+      - tests/test_regression_*.py
+    protected_paths:
+      - README.md
+      - pyproject.toml
+    max_steps: 20
+    max_changed_files: 5
+    command_timeout: 30
+    deadline_seconds: 600
