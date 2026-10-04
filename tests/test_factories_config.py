@@ -107,10 +107,54 @@ def test_completion_policy_prefers_exact_workspace_relative_path(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["cat README.md || true", "cat other-README.md",
-                                     "cat /dev/null; echo README.md", "cat README.md > /dev/null"])
+                                     "cat /dev/null; echo README.md", "cat README.md > /dev/null",
+                                     "cat README.md && true", "cat README.md | cat",
+                                     "cat README.md\ntrue", "cat $(echo README.md)"])
 def test_compound_or_substring_read_is_not_file_evidence(tmp_path, command):
     (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
     decision = FileEvidenceCompletionPolicy().evaluate(
         CompletionContext("Read README.md", LocalEnvironment(str(tmp_path)), (command,))
     )
     assert not decision.allowed
+
+
+def test_file_evidence_lists_all_remaining_reads_without_counting_the_plan(tmp_path):
+    for path in ("app.py", "README.md"):
+        (tmp_path / path).write_text("# content\n")
+    policy = FileEvidenceCompletionPolicy()
+    environment = LocalEnvironment(str(tmp_path))
+    task = "Fix app.py and preserve README.md; app.py is the implementation."
+    blocked = policy.evaluate(CompletionContext(task, environment, ()))
+    assert not blocked.allowed
+    assert blocked.required_commands == ("cat app.py", "cat README.md")
+    assert all(command in blocked.reason for command in blocked.required_commands)
+
+    partial = policy.evaluate(CompletionContext(task, environment, ("cat app.py",)))
+    assert not partial.allowed
+    assert partial.required_commands == ("cat README.md",)
+    complete = policy.evaluate(CompletionContext(task, environment, ("cat app.py README.md",)))
+    assert complete.allowed
+    assert complete.required_commands == ()
+
+
+def test_suggested_read_quotes_resolved_paths(tmp_path):
+    nested = tmp_path / "a directory"
+    nested.mkdir()
+    (nested / "app.py").write_text("# content\n")
+    policy = FileEvidenceCompletionPolicy()
+    environment = LocalEnvironment(str(tmp_path))
+    task = "Explain app.py"
+    decision = policy.evaluate(CompletionContext(task, environment, ()))
+    assert decision.required_commands == ("cat 'a directory/app.py'",)
+    assert environment.execute(decision.required_commands[0]).status.value == "success"
+    assert policy.evaluate(CompletionContext(task, environment, decision.required_commands)).allowed
+
+
+def test_suggested_read_does_not_treat_filename_as_cat_option(tmp_path):
+    (tmp_path / "-app.py").write_text("# content\n")
+    policy = FileEvidenceCompletionPolicy()
+    environment = LocalEnvironment(str(tmp_path))
+    decision = policy.evaluate(CompletionContext("Explain -app.py", environment, ()))
+    assert decision.required_commands == ("cat ./-app.py",)
+    assert environment.execute(decision.required_commands[0]).status.value == "success"
+    assert policy.evaluate(CompletionContext("Explain -app.py", environment, decision.required_commands)).allowed

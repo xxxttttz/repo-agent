@@ -71,6 +71,7 @@ class DefaultAgent:
             {"role": "user", "content": self._render(self.instance_template, **variables)},
         ])
         self._describe_verification()
+        self._describe_file_evidence(task, ())
         return self._run_steps(task, [])
 
     def resume(self, task: str, trajectory: dict) -> AgentResult:
@@ -111,7 +112,62 @@ class DefaultAgent:
             resume_message += f" The previous run stopped with this error: {prior_error}"
         self.messages.append({"role": "user", "content": resume_message})
         self._describe_verification()
+        self._describe_file_evidence(task, tuple(
+            step.command for step in steps if isinstance(step.command, str)
+            and step.execution_status is ExecutionStatus.SUCCESS and step.submission is None))
         return self._run_steps(task, steps)
+
+    def _describe_file_evidence(self, task: str, successful_commands: tuple[str, ...]) -> None:
+        """Explain the built-in evidence contract before spending model actions."""
+        if type(self.completion_policy) is not FileEvidenceCompletionPolicy:
+            return
+        decision = self.completion_policy.evaluate(CompletionContext(task, self.env, successful_commands))
+        if decision.required_commands:
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "File-evidence requirements before submission:\n"
+                    + decision.reason
+                    + "\nOnly successful standalone read commands count for this policy. "
+                    "Reads combined with &&, ||, pipes, redirections or command substitutions "
+                    "do not count, even if the overall command succeeds. Reading several files "
+                    "in a single standalone cat command is allowed. Existing successful standalone "
+                    "reads remain evidence; do not redo completed edits or recreate existing tests."
+                ),
+            })
+
+    def _hint_on_submission_recovery(self, task: str, steps: list[AgentStep],
+                                     successful_commands: list[str]) -> None:
+        """Explain evidence progress after a rejection without accepting the task."""
+        if type(self.completion_policy) is not FileEvidenceCompletionPolicy:
+            return
+        latest = steps[-1]
+        if (latest.execution_status is not ExecutionStatus.SUCCESS or latest.submission is not None
+                or not isinstance(latest.command, str)):
+            return
+        rejected = next((step for step in reversed(steps[:-1]) if step.submission is not None), None)
+        if rejected is None or not rejected.completion_rejection:
+            return
+        before = self.completion_policy.evaluate(CompletionContext(
+            task, self.env, tuple(successful_commands[:-1])))
+        after = self.completion_policy.evaluate(CompletionContext(task, self.env, tuple(successful_commands)))
+        if not before.required_commands or before.required_commands == after.required_commands:
+            return
+        if after.allowed:
+            content = (
+                "Submission recovery: the required file-reading evidence is now complete. "
+                "This is not task acceptance and does not prove the implementation is correct. "
+                "If the requested work is actually finished, submit the complete final summary "
+                "with the independent completion marker as your next action; do not repeat "
+                "completed edits, recreate existing tests, or spend actions merely echoing status."
+            )
+            if self.verification_commands:
+                content += " The runner will rerun all required checks on submission; they must still pass."
+            else:
+                content += " If you changed code, run relevant tests after the last change before submitting."
+        else:
+            content = "Submission recovery: file evidence still blocks submission.\n" + after.reason
+        self.messages.append({"role": "user", "content": content})
 
     def _describe_verification(self) -> None:
         if self.protected_files.paths:
@@ -281,6 +337,7 @@ class DefaultAgent:
                              execution.status, execution.error, execution.truncated, None, execution.submission)
             steps.append(step)
             self._hint_on_repeated_reads(steps)
+            self._hint_on_submission_recovery(task, steps, successful_commands)
             if self.cancellation_check():
                 return self._cancelled_result(steps)
             if execution.submission is not None:
@@ -306,6 +363,10 @@ class DefaultAgent:
                         "Your next command must be a non-submission shell command "
                         "that addresses this reason. Do not repeat the completion "
                         "marker until you have new successful evidence."
+                        " Address only the reported blockers: preserve completed edits and "
+                        "existing regression tests instead of recreating them. Once the blockers "
+                        "are resolved and the task is actually solved, submit again promptly; "
+                        "a status-only echo is not a submission."
                         " When you resubmit, provide the complete task summary again, including "
                         "the actual changes or findings, verification evidence, and any remaining "
                         "limitations. Do not replace the summary with a note about resubmitting."

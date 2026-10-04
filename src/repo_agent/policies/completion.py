@@ -17,6 +17,7 @@ class CompletionContext:
 class CompletionDecision:
     allowed: bool
     reason: str = ""
+    required_commands: tuple[str, ...] = ()
 
 
 class CompletionPolicy(Protocol):
@@ -38,6 +39,7 @@ class FileEvidenceCompletionPolicy:
             context.task,
             context.environment,
         )
+        unread = []
 
         for requested_name, info in targets.items():
             status = info["status"]
@@ -82,13 +84,19 @@ class FileEvidenceCompletionPolicy:
                 target_path,
                 context.successful_commands,
             ):
-                return CompletionDecision(
-                    allowed=False,
-                    reason=(
-                        "You have not read the required target file "
-                        f"'{target_path}' yet."
-                    ),
-                )
+                unread.append(target_path)
+
+        if unread:
+            commands = tuple(f"cat {shlex.quote('./' + path if path.startswith('-') else path)}"
+                             for path in dict.fromkeys(unread))
+            return CompletionDecision(
+                allowed=False,
+                reason=("\n".join(f"You have not read the required target file '{path}' yet."
+                                  for path in dict.fromkeys(unread))
+                        + "\nRun these as separate actions (not a compound shell command):\n"
+                        + "\n".join(commands)),
+                required_commands=commands,
+            )
 
         if not context.successful_commands:
             return CompletionDecision(False, "Run a successful non-submission command before finishing.")

@@ -8,6 +8,11 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Upfront and resume-aware standalone-read plans for the built-in file-evidence
+  policy, complete resolved-file blockers on rejection, and progress/resubmission
+  guidance after evidence repair. Compound reads still do not count; guidance
+  never auto-submits, invokes custom policies early or bypasses required checks.
+
 - Read-only, commit/hash-bound candidate patch and minimal review-evidence
   downloads, with stored-byte checksum validation, safe attachment filenames,
   authentication and no-store/nosniff headers. Console downloads use Bearer

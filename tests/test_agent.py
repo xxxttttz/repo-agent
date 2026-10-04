@@ -92,6 +92,147 @@ def test_rejection_requires_next_command_to_gather_evidence(tmp_path):
     assert "Do not repeat the completion marker" in rejection
 
 
+class SnapshotModel(SequenceModel):
+    def query(self, messages):
+        self.seen.append(copy.deepcopy(messages))
+        return next(self.actions)
+
+
+def test_required_standalone_reads_are_described_before_first_action(tmp_path):
+    for path in ("app.py", "README.md"):
+        (tmp_path / path).write_text("# content\n")
+    model = SnapshotModel([action("status only", "echo ready")])
+    result = DefaultAgent(model, LocalEnvironment(str(tmp_path)), max_steps=1).run("Explain app.py and README.md")
+    contract = model.seen[0][-1]["content"]
+    assert contract.startswith("File-evidence requirements")
+    assert "cat app.py" in contract and "cat README.md" in contract
+    assert "&&" in contract and "do not count" in contract
+    assert result.status is AgentStatus.MAX_STEPS
+    assert result.step_count == 1
+
+
+def test_rejected_submission_reports_all_reads_and_progress_then_resubmits(tmp_path):
+    for path in ("app.py", "README.md"):
+        (tmp_path / path).write_text("# content\n")
+    model = SnapshotModel([
+        action("compound inspection", "cat app.py && cat README.md"),
+        action("too early", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("inspect implementation", "cat app.py"),
+        action("inspect documentation", "cat README.md"),
+        action("complete summary", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ])
+    agent = DefaultAgent(model, LocalEnvironment(str(tmp_path)), max_steps=5,
+                         verification_commands=["true"])
+    result = agent.run("Explain app.py and README.md")
+    assert result.status is AgentStatus.COMPLETED
+    rejection = result.steps[1].completion_rejection
+    assert "cat app.py" in rejection and "cat README.md" in rejection
+    hints = [message["content"] for message in result.messages
+             if message["content"].startswith("Submission recovery:")]
+    assert len(hints) == 2
+    assert "cat README.md" in hints[0] and "cat app.py" not in hints[0]
+    assert "file-reading evidence is now complete" in hints[1]
+    assert "not task acceptance" in hints[1]
+    assert "rerun all required checks" in hints[1]
+    assert result.step_count == 5
+    assert agent.serialize()["verifications"][0]["submission_step"] == 5
+
+
+@pytest.mark.parametrize("command", ["echo app.py", "cat app.py && true", "cat missing.py"])
+def test_submission_recovery_does_not_treat_status_compound_or_failed_reads_as_progress(tmp_path, command):
+    (tmp_path / "app.py").write_text("# content\n")
+    result = DefaultAgent(SequenceModel([
+        action("too early", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("not sufficient", command),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2).run("Explain app.py")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert not any(m["content"].startswith("Submission recovery:") for m in result.messages)
+
+
+def test_recovery_hint_never_bypasses_failing_verification(tmp_path):
+    (tmp_path / "app.py").write_text("# content\n")
+    agent = DefaultAgent(SequenceModel([
+        action("too early", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("read", "cat app.py"),
+        action("try again", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=3, verification_commands=["false"])
+    result = agent.run("Explain app.py")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert "Required verification failed" in result.steps[-1].completion_rejection
+    assert result.handoff["submission_accepted"] is False
+    assert len(agent.serialize()["verifications"]) == 1
+
+
+def test_recovery_hint_never_bypasses_protected_files(tmp_path):
+    (tmp_path / "app.py").write_text("# content\n")
+    (tmp_path / "README.md").write_text("original\n")
+    agent = DefaultAgent(SequenceModel([
+        action("change protected file", "printf changed > README.md"),
+        action("too early", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("read", "cat app.py"),
+        action("try again", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=4, protected_paths=["README.md"])
+    result = agent.run("Explain app.py")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert "README.md" in result.steps[-1].completion_rejection
+    assert result.handoff["submission_accepted"] is False
+
+
+def test_recovery_hint_without_required_checks_does_not_claim_tests_passed(tmp_path):
+    (tmp_path / "app.py").write_text("# content\n")
+    result = DefaultAgent(SequenceModel([
+        action("too early", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("read", "cat app.py"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2).run("Explain app.py")
+    hints = [m["content"] for m in result.messages if m["content"].startswith("Submission recovery:")]
+    assert len(hints) == 1
+    assert "run relevant tests after the last change" in hints[0]
+    assert result.status is AgentStatus.MAX_STEPS
+    assert result.handoff["verification"]["state"] == "not_configured"
+
+
+def test_file_evidence_guidance_does_not_invoke_custom_policy_early(tmp_path):
+    from repo_agent.policies import CompletionDecision
+
+    class SubmissionOnlyPolicy:
+        calls = 0
+
+        def evaluate(self, context):
+            self.calls += 1
+            return CompletionDecision(False, "Caller-controlled rejection")
+
+    policy = SubmissionOnlyPolicy()
+    result = DefaultAgent(SequenceModel([
+        action("inspect", "pwd"),
+        action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("inspect again", "pwd"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=3, completion_policy=policy).run("Explain app.py")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert policy.calls == 1
+    assert not any(m["content"].startswith(("File-evidence requirements", "Submission recovery:"))
+                   for m in result.messages)
+
+
+def test_resume_read_plan_preserves_successful_evidence(tmp_path):
+    for path in ("app.py", "README.md"):
+        (tmp_path / path).write_text("# content\n")
+    first = DefaultAgent(SequenceModel([action("inspect", "cat app.py")]),
+                         LocalEnvironment(str(tmp_path)), max_steps=1)
+    task = "Explain app.py and README.md"
+    first.run(task)
+    model = SnapshotModel([
+        action("inspect remaining file", "cat README.md"),
+        action("summary", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ])
+    resumed = DefaultAgent(model, LocalEnvironment(str(tmp_path)), max_steps=2)
+    result = resumed.resume(task, first.serialize())
+    contract = model.seen[0][-1]["content"]
+    assert contract.startswith("File-evidence requirements")
+    assert "cat README.md" in contract and "cat app.py" not in contract
+    assert result.status is AgentStatus.COMPLETED
+    assert result.step_count == 3
+
+
 def test_submission_uses_assistant_content_when_marker_has_no_payload(tmp_path):
     result = DefaultAgent(SequenceModel([action("inspect", "ls -la"), action("readable summary", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")]),
                           LocalEnvironment(str(tmp_path))).run("Keep inspecting")

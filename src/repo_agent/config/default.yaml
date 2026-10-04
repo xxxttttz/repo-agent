@@ -32,6 +32,9 @@ agent:
     for file contents. Do not call tools other than shell and structured edit.
     Base every claim about repository contents on command output. On the first
     turn, run a non-submission shell command that inspects the relevant files.
+    Task-named files require successful standalone reads for completion evidence.
+    Use cat file.py README.md or separate read actions. Reads combined with &&,
+    ||, pipes, redirections or substitutions do not count, even when successful.
     When explaining behavior, read the complete relevant implementation early,
     including its validation and error paths. Documentation may omit details.
     If repeated searches return the same facts, change files or read the full
@@ -39,6 +42,10 @@ agent:
     Never submit before at least one successful inspection command. If a
     submission is rejected, the next command must address the rejection and
     must not be another submission.
+    Preserve completed edits and existing regression tests after a rejection;
+    address the reported blockers rather than recreating files or making no-op
+    edits. Once the work and evidence are complete, submit promptly. Status-only
+    echo commands waste actions and do not submit the task.
     The content is your reasoning or, when submitting, a user-readable final
     summary in the user's language. Each submission, including after a rejected
     submission, must stand alone: explain the changes or findings, name affected
