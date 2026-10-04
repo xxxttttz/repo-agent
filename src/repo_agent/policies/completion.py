@@ -1,4 +1,5 @@
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -89,6 +90,8 @@ class FileEvidenceCompletionPolicy:
                     ),
                 )
 
+        if not context.successful_commands:
+            return CompletionDecision(False, "Run a successful non-submission command before finishing.")
         return CompletionDecision(allowed=True)
 
     def _extract_target_files(self, task: str) -> list[str]:
@@ -146,10 +149,18 @@ class FileEvidenceCompletionPolicy:
         successful_commands: tuple[str, ...],
     ) -> bool:
         for command in successful_commands:
-            if path not in command:
+            # Fail closed for shell composition: a successful overall exit does
+            # not prove that the read itself succeeded (e.g. `cat x || true`).
+            if any(char in command for char in ("$", "`", "\n")):
                 continue
-
-            if command.strip().startswith(self._READ_COMMANDS):
+            try:
+                tokens = list(shlex.shlex(command, posix=True, punctuation_chars=True))
+            except ValueError:
+                continue
+            if any(token and all(char in "();<>|&" for char in token) for token in tokens):
+                continue
+            if (tokens and tokens[0] + " " in self._READ_COMMANDS
+                    and path in [token.removeprefix("./") for token in tokens[1:]]):
                 return True
 
         return False

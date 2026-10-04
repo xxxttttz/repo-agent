@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .environments.local import ExecutionStatus
@@ -15,7 +15,7 @@ class AgentStatus(str, Enum):
 class AgentStep:
     number: int
     content: str
-    command: str | None
+    command: str | dict[str, str] | None
     output: str | None = None
     returncode: int | None = None
     execution_status: ExecutionStatus | None = None
@@ -61,6 +61,7 @@ class AgentResult:
     answer: str
     steps: tuple[AgentStep, ...]
     messages: tuple[dict, ...] = ()
+    handoff: dict = field(default_factory=dict)
 
     @property
     def step_count(self) -> int:
@@ -71,7 +72,7 @@ class AgentResult:
         return tuple(
             step.command
             for step in self.steps
-            if step.command is not None
+            if isinstance(step.command, str)
             and step.execution_status is ExecutionStatus.SUCCESS
             and step.submission is None
         )

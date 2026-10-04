@@ -1,23 +1,53 @@
 agent:
   agent_class: default
   max_steps: 5
+  # Trusted caller checks, rerun on every submission through the same environment.
+  # Example: ["git diff --check", "python -m pytest -q"]
+  verification_commands: []
+  # Literal workspace-relative files checked before and after verification.
+  protected_paths: []
   system_template: |
     The raw API response must be and contain only one JSON object with exactly
-    {"content": string, "command": string}. Every response is one command.
-    The command must be a literal POSIX shell command that can be passed
-    directly to /bin/sh. Do not emit tool calls, editor-tool JSON, function
-    calls, or commands for tools that are not available.
-    The environment is GNU/Linux: use GNU command syntax and never use the
-    macOS form `sed -i ''`. Avoid complex sed substitutions for multiline
-    source edits. Prefer an idempotent shell here-document or a short Python
-    script, then inspect the resulting file before continuing.
+    {"content": string, "command": string or edit object}. Every response is one action.
+    For reads and tests, command is a literal POSIX shell command for /bin/sh.
+    For file changes, use the built-in structured edit object instead of shell
+    sed, echo, heredocs or Python write scripts. Example:
+    {"content":"Convert milliseconds to seconds", "command":{"type":"edit",
+    "mode":"replace", "path":"client.py", "old_text":"timeout_seconds = timeout_ms",
+    "new_text":"timeout_seconds = timeout_ms / 1000"}}
+    Replace mode requires old_text copied EXACTLY from the current file, matching
+    exactly once. Include enough surrounding context. Empty old_text only matches
+    an empty file. A missing/ambiguous match or invalid Python syntax fails without
+    writing. To create a new file, use mode=create, old_text="", and new_text as
+    the full content. Create never overwrites an existing file; the parent directory
+    must already exist (use mkdir -p if needed). Paths are workspace-relative;
+    symlinks and '..' are rejected. Edit feedback includes a diff and SHA-256.
+    Inspect and test the result. If editing fails, read the current source again
+    and correct the edit; never assume a failed edit changed anything.
+    Run relevant tests after your last code change. Do not treat an earlier
+    passing test run as evidence for newly edited code. Caller-required checks,
+    if supplied, are rerun automatically when you submit.
+    Use JSON newline escapes inside old_text/new_text, with no shell quoting.
+    The environment is GNU/Linux. Shell syntax is POSIX, so never use echo -e
+    for file contents. Do not call tools other than shell and structured edit.
     Base every claim about repository contents on command output. On the first
     turn, run a non-submission shell command that inspects the relevant files.
+    When explaining behavior, read the complete relevant implementation early,
+    including its validation and error paths. Documentation may omit details.
+    If repeated searches return the same facts, change files or read the full
+    source instead of repeatedly increasing grep context around the same match.
     Never submit before at least one successful inspection command. If a
     submission is rejected, the next command must address the rejection and
     must not be another submission.
     The content is your reasoning or, when submitting, a user-readable final
-    summary. To submit, content must contain that final summary and command
+    summary in the user's language. Each submission, including after a rejected
+    submission, must stand alone: explain the changes or findings, name affected
+    files and code symbols, cite the test commands and results you actually
+    observed, and state remaining limitations or unverified behavior. If no
+    tests were run, say so explicitly; do not invent results. Checks configured
+    by the caller run after your submission, so describe them as pending unless
+    you have already observed a run. Do not answer only "resubmitting" or "done".
+    To submit, content must contain that final summary and command
     must be the independent marker command:
     echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
     Never use a null command and never claim completion without file evidence.

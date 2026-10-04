@@ -34,6 +34,8 @@ class ServiceTask:
     memory: tuple[MemoryTurn, ...] = ()
     cancellation_check: Callable[[], bool] | None = None
     environment_config: dict = field(default_factory=dict)
+    verification_commands: list[str] | None = None
+    protected_paths: list[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +59,8 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
         provider=spec.provider,
         model=spec.model,
         max_steps=spec.max_steps,
+        verify=spec.verification_commands,
+        protect=spec.protected_paths,
     )
     config = load_config()
     agent_config, environment_config, model_config = _component_configs(config, args)

@@ -11,7 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -57,6 +57,12 @@ class TaskRequest(BaseModel):
     model: str | None = None
     max_steps: int = Field(default=5, ge=1, le=100)
     top_k: int = Field(default=5, ge=1, le=50)
+    verification_commands: list[Annotated[str, Field(min_length=1, max_length=4000)]] | None = Field(
+        default=None, max_length=20,
+    )
+    protected_paths: list[Annotated[str, Field(min_length=1, max_length=1024)]] | None = Field(
+        default=None, max_length=100,
+    )
     session_id: str | None = Field(
         default=None,
         min_length=1,
@@ -383,6 +389,8 @@ class TaskManager:
                     memory=tuple(memory),
                     cancellation_check=cancellation_check,
                     environment_config=self.environment_config,
+                    verification_commands=request.verification_commands,
+                    protected_paths=request.protected_paths,
                 ),
                 cache=self.cache,
             )
@@ -470,7 +478,7 @@ class TaskManager:
                         )
 
                     merged = False
-                    if final_commit is not None:
+                    if final_commit is not None and pending_update and pending_update.get("status") == "completed":
                         try:
                             merge_commit = self.worktree_manager.merge_into_source(
                                 task_worktree
@@ -497,16 +505,17 @@ class TaskManager:
                                 worktree_merge_error=None,
                             )
 
-                    self.worktree_manager.remove(
-                        task_worktree,
-                        force=True,
-                        delete_branch=final_commit is None or merged,
-                    )
-                    self._update(
-                        task_id,
-                        worktree_cleaned=True,
-                        worktree_cleanup_error=None,
-                    )
+                    # Failed/cancelled/unfinished tasks may contain the only
+                    # copy of uncommitted work. Keep their checkout and branch.
+                    if pending_update and pending_update.get("status") in {"completed", "merge_conflict"}:
+                        self.worktree_manager.remove(
+                            task_worktree,
+                            force=True,
+                            delete_branch=final_commit is None or merged,
+                        )
+                        self._update(task_id, worktree_cleaned=True, worktree_cleanup_error=None)
+                    else:
+                        self._update(task_id, worktree_cleaned=False, worktree_cleanup_error=None)
                 except Exception as error:  # noqa: BLE001 - preserve task result.
                     logger.warning(
                         "Task worktree cleanup failed for %s: %s",

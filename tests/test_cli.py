@@ -28,6 +28,18 @@ def test_print_result_shows_agent_error(capsys):
     assert "Agent stopped with error: provider unavailable" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("checks, state", [([], "not_configured"), (["true"], "passed"),
+                                          (["false"], "not_accepted")])
+def test_cli_displays_runner_receipt_separately(tmp_path, capsys, checks, state):
+    args = ["--provider", "mock", "--workspace", str(tmp_path), "--max-steps", "2", "Inspect project"]
+    for check in checks:
+        args.extend(["--verify", check])
+    main(args)
+    output = capsys.readouterr().out
+    assert "Runner evidence (separate from the model summary):" in output
+    assert f"Caller-required verification: {state}" in output
+
+
 def test_parser_allows_resume_without_positional_task():
     args = build_parser().parse_args(["--resume", "trajectory.json"])
     assert args.task is None
@@ -74,3 +86,18 @@ def test_cli_resumes_saved_task_workspace_and_mock_provider(tmp_path, capsys):
     assert [step["number"] for step in resumed["steps"]] == [1, 2]
     assert resumed["component_config"]["environment"]["cwd"] == str(tmp_path)
     assert "Submitting the result." in capsys.readouterr().out
+
+
+def test_cli_verification_is_saved_and_blocks_completion(tmp_path):
+    trajectory = tmp_path / "trajectory.json"
+    status = main([
+        "--provider", "mock", "--workspace", str(tmp_path), "--max-steps", "2",
+        "--verify", "test -f expected.txt", "--output", str(trajectory), "Inspect project",
+    ])
+    assert status == 1
+    saved = json.loads(trajectory.read_text())
+    assert saved["component_config"]["agent"]["verification_commands"] == ["test -f expected.txt"]
+    assert saved["verifications"][0]["status"] == "failed"
+    (tmp_path / "expected.txt").write_text("done")
+    assert main(["--resume", str(trajectory), "--max-steps", "1"]) == 0
+    assert json.loads(trajectory.read_text())["verifications"][-1]["status"] == "success"

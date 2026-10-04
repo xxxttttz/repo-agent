@@ -1,11 +1,17 @@
-from .base import AgentAction, MessageModel, ModelBackend, ModelResponseError, ModelTransportError
+import copy
+import importlib
+
+from .base import (
+    AgentAction,
+    MessageModel,
+    ModelBackend,
+    ModelResponseError,
+    ModelTransportError,
+)
 from .groq import GroqModel
 from .huggingface import HuggingFaceModel
 from .mock import MockModel
 from .openrouter import OpenRouterModel
-
-import copy
-import importlib
 
 _MODEL_MAPPING = {
     "mock": "repo_agent.models.mock.MockModel",
@@ -39,9 +45,9 @@ __all__ = [
     "AgentAction",
     "GroqModel",
     "HuggingFaceModel",
+    "MessageModel",
     "MockModel",
     "ModelBackend",
-    "MessageModel",
     "ModelResponseError",
     "ModelTransportError",
     "OpenRouterModel",

@@ -1,4 +1,3 @@
-from pathlib import Path
 import re
 
 import pytest
@@ -6,8 +5,20 @@ import pytest
 from repo_agent import Agent, Environment, Model, __version__
 from repo_agent.agents import DefaultAgent, get_agent, get_agent_class
 from repo_agent.config import builtin_config_dir, get_config_from_spec, load_config
-from repo_agent.environments import DockerEnvironment, LocalEnvironment, get_environment, get_environment_class
-from repo_agent.models import GroqModel, HuggingFaceModel, MockModel, OpenRouterModel, get_model, get_model_class
+from repo_agent.environments import (
+    DockerEnvironment,
+    LocalEnvironment,
+    get_environment,
+    get_environment_class,
+)
+from repo_agent.models import (
+    GroqModel,
+    HuggingFaceModel,
+    MockModel,
+    OpenRouterModel,
+    get_model,
+    get_model_class,
+)
 from repo_agent.policies import CompletionContext, FileEvidenceCompletionPolicy
 from repo_agent.run.local import _component_configs, build_parser
 
@@ -93,3 +104,13 @@ def test_completion_policy_prefers_exact_workspace_relative_path(tmp_path):
         CompletionContext("Read README.md", environment, ("grep -m1 '^#' README.md",))
     )
     assert inspected_with_grep.allowed
+
+
+@pytest.mark.parametrize("command", ["cat README.md || true", "cat other-README.md",
+                                     "cat /dev/null; echo README.md", "cat README.md > /dev/null"])
+def test_compound_or_substring_read_is_not_file_evidence(tmp_path, command):
+    (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
+    decision = FileEvidenceCompletionPolicy().evaluate(
+        CompletionContext("Read README.md", LocalEnvironment(str(tmp_path)), (command,))
+    )
+    assert not decision.allowed

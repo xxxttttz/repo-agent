@@ -62,4 +62,4 @@ def load_config(config_path: str | Path | None = None, overrides: list[str] | tu
     return config
 
 
-__all__ = ["builtin_config_dir", "get_config_path", "get_config_from_spec", "load_config"]
+__all__ = ["builtin_config_dir", "get_config_from_spec", "get_config_path", "load_config"]

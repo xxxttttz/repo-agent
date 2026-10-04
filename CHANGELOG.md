@@ -8,6 +8,36 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Runner-generated handoff receipts on every terminal status, kept separate
+  from model prose in CLI, trajectory, API and evaluation results. Receipts
+  distinguish absent/unrun checks and accepted verification, with successful
+  structured edit action history and explicit scope limits.
+- Diagnostic summary subject coverage in evaluations, independent of code
+  grading; final-summary prompts also apply after rejected submissions.
+
+- Budget reminders before the final three/one model actions, including built-in
+  file-evidence blockers and resume-aware remaining-turn accounting; no forced
+  completion or automatic budget extension.
+- Evaluation CLI `--verify` for caller-selected submission checks, with explicit
+  report configuration and unchanged independent grading.
+
+- Structured exact text replacement and exclusive file creation actions, with
+  Python syntax validation, workspace path checks, atomic writes, diff feedback,
+  provider protocol/history support, and trajectory resume compatibility.
+- Docker edit dispatch executes the stdlib editor in the configured container
+  instead of modifying files through the host executor.
+
+- Caller-selected protected file invariants via CLI `--protect`, YAML, HTTP,
+  and evaluation runs, checked before/after verification and preserved on resume.
+
+- `repo-agent-eval` with four packaged coding/investigation fixtures,
+  independent acceptance checks, repeated runs, and retained JSON/trajectory
+  artifacts reporting success, false completion, scope changes, steps, and time.
+
+- Caller-configured completion checks through CLI `--verify`, YAML, and HTTP;
+  each submission reruns checks and records diagnostics in the trajectory.
+- CI lint checks alongside the existing test and build jobs.
+
 - Dependency-free source chunking and BM25 retrieval with English identifier
   and Chinese character matching.
 - Local `repo-agent search` command for querying a workspace without a model or
@@ -27,6 +57,27 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 - A one-shot Docker execution environment with restrictive network, filesystem,
   capability, CPU, memory, PID, and environment defaults.
 - Environment-variable isolation for commands launched by the HTTP service.
+
+### Fixed
+
+- Provider request retries now include direct connection interruptions such as
+  `RemoteDisconnected`, reset connections and broken pipes, bounded by the
+  existing retry limit; exhausted retries retain their original cause.
+
+- The deduplication evaluation task explicitly requires a list return value
+  and runnable unittest tests, matching its acceptance criteria.
+
+- Provider conversation history now includes the exact prior shell action
+  in its original JSON format instead of discarding it and sending only prose.
+
+- Repeated source reads now receive a recovery hint after three matching
+  outputs within six steps; investigation prompts ask for the full implementation
+  and its error paths early instead of repeatedly expanding documentation searches.
+
+- Tasks without named files can no longer complete without a successful command.
+- Compound shell commands and filename substrings no longer count as file reads.
+- Unfinished, cancelled, and failed HTTP tasks retain their Git worktrees and
+  branches instead of losing uncommitted changes during cleanup.
 
 ## [0.1.0] - 2026-08-31
 

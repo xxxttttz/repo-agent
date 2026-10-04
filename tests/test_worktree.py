@@ -142,6 +142,8 @@ def test_task_manager_executes_git_task_in_worktree(tmp_path, monkeypatch):
 
     def controlled_execute(spec, *, cache=None):
         execution_paths.append(spec.workspace)
+        assert spec.verification_commands == ["test -d src"]
+        assert spec.protected_paths == ["src/example.py"]
         (spec.workspace / "generated.txt").write_text("isolated\n", encoding="utf-8")
         return SimpleNamespace(
             trajectory={
@@ -160,7 +162,8 @@ def test_task_manager_executes_git_task_in_worktree(tmp_path, monkeypatch):
         worktree_root=tmp_path / "managed",
     )
     accepted = manager.submit(
-        TaskRequest(task="Generate a file", workspace="project", provider="mock")
+        TaskRequest(task="Generate a file", workspace="project", provider="mock",
+                    verification_commands=["test -d src"], protected_paths=["src/example.py"])
     )
 
     for _ in range(300):
@@ -184,3 +187,36 @@ def test_task_manager_executes_git_task_in_worktree(tmp_path, monkeypatch):
     assert (repo / "generated.txt").read_text(encoding="utf-8") == "isolated\n"
     assert git(repo, "show", f"{record['worktree_commit']}:generated.txt") == "isolated"
     assert git(repo, "branch", "--list", record["worktree_branch"]) == ""
+
+
+@pytest.mark.parametrize("task_status", ["max_steps", "cancelled", "error", "exception"])
+def test_unfinished_task_preserves_uncommitted_work(tmp_path, monkeypatch, task_status):
+    repo = create_repo(tmp_path / "project")
+
+    def controlled_execute(spec, *, cache=None):
+        (spec.workspace / "partial.txt").write_text("valuable progress\n", encoding="utf-8")
+        if task_status == "exception":
+            raise RuntimeError("provider crashed")
+        return SimpleNamespace(
+            trajectory={"status": task_status, "answer": "unfinished", "messages": [], "steps": []},
+            index={},
+        )
+
+    monkeypatch.setattr("repo_agent.api.execute_task", controlled_execute)
+    manager = TaskManager(tmp_path, redis_url=None, worktree_root=tmp_path / "managed")
+    try:
+        accepted = manager.submit(TaskRequest(task="Implement feature", workspace="project", provider="mock"))
+        for _ in range(300):
+            record = manager.get(accepted["id"])
+            if record["status"] not in {"queued", "running"}:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("task did not finish")
+        assert record["status"] == ("error" if task_status == "exception" else task_status)
+        assert record["worktree_cleaned"] is False
+        assert (Path(record["worktree_path"]) / "partial.txt").read_text() == "valuable progress\n"
+        assert not (repo / "partial.txt").exists()
+        assert git(repo, "branch", "--list", record["worktree_branch"])
+    finally:
+        manager.close()

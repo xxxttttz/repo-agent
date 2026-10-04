@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from jinja2 import StrictUndefined, Template
 
+from ..tools.edit import EDIT_SCHEMA, EditError, validate_edit
+
 DEFAULT_OBSERVATION_TEMPLATE = (
     "Command status: {{ output.status.value if output.status is defined else output.status }}\n"
     "{% if output.returncode is defined and output.returncode is not none %}Return code: {{ output.returncode }}\n{% endif %}"
@@ -17,7 +19,7 @@ DEFAULT_OBSERVATION_TEMPLATE = (
 
 ACTION_JSON_SCHEMA = {
     "type": "object",
-    "properties": {"content": {"type": "string"}, "command": {"type": "string"}},
+    "properties": {"content": {"type": "string"}, "command": {"anyOf": [{"type": "string"}, EDIT_SCHEMA]}},
     "required": ["content", "command"],
     "additionalProperties": False,
 }
@@ -26,7 +28,7 @@ ACTION_JSON_SCHEMA = {
 @dataclass(frozen=True, slots=True)
 class AgentAction:
     content: str
-    command: str | None
+    command: str | dict[str, str] | None
 
 
 class ModelBackend(Protocol):
@@ -74,7 +76,18 @@ class MessageModel:
 
 
 def build_api_messages(messages: list[dict]) -> list[dict]:
-    return [{"role": message["role"], "content": message.get("content", "")} for message in messages]
+    result = []
+    for message in messages:
+        content = message.get("content", "")
+        actions = message.get("extra", {}).get("actions", [])
+        if (message["role"] == "assistant" and actions and isinstance(actions[0], dict)
+                and isinstance(actions[0].get("command"), (str, dict))):
+            # Adapters store reasoning separately from the executed action.
+            # Restore the provider's JSON response format so the next turn
+            # sees the exact command, not just its prose description.
+            content = json.dumps({"content": content, "command": actions[0]["command"]}, ensure_ascii=False)
+        result.append({"role": message["role"], "content": content})
+    return result
 
 
 def send_with_retry(
@@ -96,7 +109,7 @@ def send_with_retry(
             if not transient or attempt == max_retries:
                 break
             time.sleep(_retry_delay(error, attempt))
-        except urllib.error.URLError as error:
+        except (urllib.error.URLError, ConnectionError) as error:
             last_error = error
             if attempt == max_retries:
                 break
@@ -143,8 +156,13 @@ def parse_agent_action(raw_content: object, *, require_command: bool = False) ->
         raise ModelResponseError(f"Unexpected field(s): {', '.join(sorted(extra))}.")
     if not isinstance(payload["content"], str):
         raise ModelResponseError("'content' must be a string.")
-    if not isinstance(payload["command"], str):
-        raise ModelResponseError("'command' must be a string.")
+    if isinstance(payload["command"], dict):
+        try:
+            validate_edit(payload["command"])
+        except EditError as error:
+            raise ModelResponseError(str(error)) from error
+    elif not isinstance(payload["command"], str):
+        raise ModelResponseError("'command' must be a shell string or a structured edit object.")
     return AgentAction(payload["content"], payload["command"])
 
 

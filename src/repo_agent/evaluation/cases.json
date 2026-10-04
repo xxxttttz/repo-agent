@@ -1,0 +1,62 @@
+[
+  {
+    "id": "pagination-boundary",
+    "category": "bugfix",
+    "task": "Fix paginate in pagination.py: page numbers start at 1; return up to page_size items without dropping the last item. Reject page < 1 or page_size < 1 with ValueError. Preserve empty/out-of-range behavior. Add regression tests under tests/. Inspect README.md and preserve it. Run the test suite before submitting.",
+    "files": {
+      "README.md": "# Pagination library\nRun: python -m unittest discover -s tests\n",
+      "pagination.py": "def paginate(items, page, page_size):\n    start = (page - 1) * page_size\n    return items[start:start + page_size - 1]\n",
+      "tests/test_pagination.py": "import unittest\nfrom pagination import paginate\n\nclass PaginationTests(unittest.TestCase):\n    def test_empty(self):\n        self.assertEqual(paginate([], 1, 3), [])\n"
+    },
+    "allowed_changes": ["pagination.py", "tests/*.py"],
+    "answer_contains": [],
+    "summary_subjects": ["paginate", "pagination.py"],
+    "baseline_passes": false,
+    "acceptance": "from pagination import paginate\nassert paginate(list(range(7)), 1, 3) == [0, 1, 2]\nassert paginate(list(range(7)), 2, 3) == [3, 4, 5]\nassert paginate(list(range(7)), 3, 3) == [6]\nassert paginate([], 1, 3) == []\nassert paginate([1], 4, 3) == []\nassert paginate([1], 1, 1) == [1]\nfor page, size in [(0, 2), (-1, 2), (1, 0), (1, -1)]:\n    try:\n        paginate([1, 2], page, size)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError('invalid pagination accepted')\n"
+  },
+  {
+    "id": "timeout-units",
+    "category": "cross-file",
+    "task": "Fix the timeout unit mismatch between settings.py and client.py. REPO_TIMEOUT_MS is a positive integer number of milliseconds, default 2500. Invalid, zero, or negative values must raise ValueError. load_settings must keep exposing timeout_ms; request_options must expose timeout_seconds converted to seconds. Add regression tests under tests/ and preserve README.md. Run the test suite.",
+    "files": {
+      "README.md": "# HTTP client settings\nPublic configuration is in milliseconds. Transport expects seconds.\nRun: python -m unittest discover -s tests\n",
+      "settings.py": "def load_settings(env):\n    return {'timeout_ms': int(env.get('REPO_TIMEOUT_MS', '2500'))}\n",
+      "client.py": "from settings import load_settings\n\ndef request_options(env):\n    return {'timeout_seconds': load_settings(env)['timeout_ms']}\n",
+      "tests/test_settings.py": "import unittest\nfrom settings import load_settings\n\nclass SettingsTests(unittest.TestCase):\n    def test_default(self):\n        self.assertEqual(load_settings({})['timeout_ms'], 2500)\n"
+    },
+    "allowed_changes": ["settings.py", "client.py", "tests/*.py"],
+    "answer_contains": [],
+    "summary_subjects": ["settings.py", "client.py", "timeout_seconds"],
+    "baseline_passes": false,
+    "acceptance": "from settings import load_settings\nfrom client import request_options\nassert load_settings({}) == {'timeout_ms': 2500}\nassert request_options({}) == {'timeout_seconds': 2.5}\nfor raw, expected in [('1', .001), ('1200', 1.2), ('30000', 30.0)]:\n    env = {'REPO_TIMEOUT_MS': raw}\n    assert load_settings(env)['timeout_ms'] == int(raw)\n    assert request_options(env)['timeout_seconds'] == expected\nfor raw in ['0', '-1', 'bad', '1.5', '']:\n    for fn in [load_settings, request_options]:\n        try:\n            fn({'REPO_TIMEOUT_MS': raw})\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('invalid timeout accepted')\n"
+  },
+  {
+    "id": "stable-deduplicate",
+    "category": "feature",
+    "task": "Implement unique_by(items, key) in records.py. Return a list containing the first item for each distinct key, preserving input order; do not return a generator or iterator. Consume an iterable only once, do not mutate its items, and evaluate key exactly once per item. Keys are hashable. Keep the existing identity helper working. Add runnable unittest regression tests under tests/, preserve README.md, and run the suite.",
+    "files": {
+      "README.md": "# Record utilities\nRun: python -m unittest discover -s tests\n",
+      "records.py": "def identity(value):\n    return value\n",
+      "tests/test_records.py": "import unittest\nfrom records import identity\n\nclass RecordTests(unittest.TestCase):\n    def test_identity(self):\n        value = {}\n        self.assertIs(identity(value), value)\n"
+    },
+    "allowed_changes": ["records.py", "tests/*.py"],
+    "answer_contains": [],
+    "summary_subjects": ["unique_by", "records.py"],
+    "baseline_passes": false,
+    "acceptance": "from records import identity, unique_by\nitems = [{'id': 2, 'v': 'a'}, {'id': 1, 'v': 'b'}, {'id': 2, 'v': 'c'}]\ncalls = []\ndef key(item):\n    calls.append(item)\n    return item['id']\nresult = unique_by((item for item in items), key)\nassert result == items[:2]\nassert result[0] is items[0] and result[1] is items[1]\nassert calls == items\nassert items[2] == {'id': 2, 'v': 'c'}\nassert unique_by([], lambda x: x) == []\nassert unique_by([None, None, 0, 1, 0], lambda x: x) == [None, 0, 1]\nassert identity(items) is items\n"
+  },
+  {
+    "id": "explain-timeout",
+    "category": "read-only",
+    "task": "Read config.py and README.md, then explain the default timeout and the environment variable that overrides it. Explain what happens for an invalid value. Do not edit any files. Include these literal facts in your answer: REPO_TIMEOUT, 30, ValueError.",
+    "files": {
+      "README.md": "# Worker configuration\nREPO_TIMEOUT overrides the default timeout in seconds.\n",
+      "config.py": "def timeout_seconds(env):\n    value = int(env.get('REPO_TIMEOUT', '30'))\n    if value <= 0:\n        raise ValueError('timeout must be positive')\n    return value\n"
+    },
+    "allowed_changes": [],
+    "answer_contains": ["REPO_TIMEOUT", "30", "ValueError"],
+    "summary_subjects": ["REPO_TIMEOUT", "30", "ValueError"],
+    "baseline_passes": true,
+    "acceptance": "from config import timeout_seconds\nassert timeout_seconds({}) == 30\nassert timeout_seconds({'REPO_TIMEOUT': '12'}) == 12\nfor raw in ['0', '-1', 'invalid']:\n    try:\n        timeout_seconds({'REPO_TIMEOUT': raw})\n    except ValueError:\n        pass\n    else:\n        raise AssertionError('invalid timeout accepted')\n"
+  }
+]

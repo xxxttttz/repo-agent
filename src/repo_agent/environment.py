@@ -1,6 +1,11 @@
 """Compatibility exports; use :mod:`repo_agent.environments.local`."""
 
-from .environments.local import DangerousCommandPolicy, ExecutionResult, ExecutionStatus, LocalEnvironment
+from .environments.local import (
+    DangerousCommandPolicy,
+    ExecutionResult,
+    ExecutionStatus,
+    LocalEnvironment,
+)
 
 Environment = LocalEnvironment
 

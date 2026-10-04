@@ -2,7 +2,7 @@
 
 > 当前版本：v0.1.0（Alpha）。核心 coding-agent 流程已经可用，执行本地命令时仍应使用隔离环境并检查 trajectory。
 
-Repo Agent 是一个精简的本地 coding agent：模型逐轮提出一个 shell 命令，环境执行并返回 observation，只有在模型使用独立提交命令且现有证据策略通过后，任务才会被接受为完成。
+Repo Agent 是一个精简的本地 coding agent：模型逐轮提出 shell 命令或结构化文件编辑动作，环境执行并返回 observation，只有在模型使用独立提交命令且现有证据策略通过后，任务才会被接受为完成。
 
 它适合用作本地仓库检查、轻量代码修改和 Agent 控制流实验。项目保持较小的依赖集合，不要求 Pydantic、Typer 或在线服务才能运行 Mock 流程。
 
@@ -25,7 +25,54 @@ Repo Agent 的核心特点是 evidence-aware completion：模型不能通过一�
 echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
 ```
 
-并且任务中提到的目标文件必须已经被成功读取。提交命令输出 marker 后的文本会成为最终答案；如果没有后续文本，则使用 assistant message 的内容作为答案。
+调查任务会提示模型尽早读取完整实现与错误处理分支。最近 6 步内若有 3 次成功读取返回相同的非空内容，Agent 会加入恢复提示，建议更换调查目标或读取完整源码；这只是提示，不会阻断命令，也不会把重复运行测试判作读取停滞。
+
+并且至少执行过一个成功的非提交命令。任务中提到的目标文件还需要匹配成功的独立读取命令；复合命令、重定向和仅包含文件名子串的命令不再作为文件读取证据。这仍是命令层面的启发式检查，不代表任务已经正确实现。提交命令输出 marker 后的文本会成为最终答案；如果没有后续文本，则使用 assistant message 的内容作为答案。
+
+### 结构化文件编辑
+
+模型可在 `command` 中直接使用编辑对象，例如：
+
+```json
+{"content":"转换超时单位","command":{"type":"edit","mode":"replace","path":"client.py","old_text":"timeout_seconds = timeout_ms","new_text":"timeout_seconds = timeout_ms / 1000"}}
+```
+
+`replace` 要求原文唯一匹配；`create` 要求文件不存在、`old_text` 为空。匹配失败、歧义或 Python 语法错误会报错，不会覆盖目标文件。成功后返回 diff 和 SHA-256。Local 与 Docker 都支持，动作可保存和恢复；默认提示优先使用编辑对象进行文件修改。详见 [编辑工具说明](docs/editing.md)。
+
+### 提交前验证
+
+可通过重复的 `--verify` 参数或 YAML 的 `agent.verification_commands` 设置必过检查：
+
+```bash
+repo-agent --workspace ./my-project --max-steps 20 \
+  --verify 'git diff --check' \
+  --verify 'python -m pytest -q' \
+  '修复登录超时并补充回归测试'
+```
+
+每次提交通过基本证据检查后，执行器都会在相同 workspace 和相同 local/Docker 环境中按顺序重新运行验证命令，沿用命令超时、输出限制和环境变量策略。检查失败、被拒绝或超时会拒绝提交，把诊断送回模型；后续提交从第一个检查重新运行。验证不占模型步骤数，结果单独保存在 trajectory 的 `verifications` 中，并通过 `submission_step` 关联提交。`--resume` 沿用已保存的检查配置，但不会复用旧的通过结果。显式 `--verify` 会替换原有检查列表。
+
+HTTP `POST /tasks` 同样接受 `verification_commands` 字符串数组。未配置时默认没有自动测试；检查命令由调用者选择，退出码为零只是所选检查通过，不保证全部需求正确，也不能防止模型修改测试。验证命令可能写入文件，应使用实际项目中可信、适合当前环境的命令。
+
+预算不少于 4 步时，剩余 3 步和 1 步的模型调用前会提醒收尾，并提示当前基本文件证据缺口；恢复任务按本次追加预算计算。提示不自动延长预算或强制提交，耗尽仍返回 `max_steps`。未配置验证时，“最后一次修改后再测试”只是模型指令，并非强制完成条件。
+
+模型被要求在每次提交（包括被拒后重新提交）给出完整的变化或调查结论、实际观察到的验证证据与未验证事项。执行器另外生成 `handoff` 回执，随 `AgentResult`、trajectory 和 HTTP 结果返回，CLI 单独显示：检查未配置、未运行、通过或未获接受不会混为一谈；已成功的结构化编辑动作也会列出，但不冒充最终文件 diff。模型回答保持原样，回执不为其全部文字背书，详见 [交付与验证回执](docs/handoff.md)。
+
+### 保护不应修改的文件
+
+使用重复的 `--protect PATH`、YAML `agent.protected_paths` 或 HTTP `protected_paths` 数组明确指定受保护文件，例如：
+
+```bash
+repo-agent --workspace ./my-project --max-steps 20 \
+  --protect README.md --protect pyproject.toml \
+  --verify 'python -m pytest -q' '修复缺陷，保持文档和依赖配置不变'
+```
+
+路径必须是 workspace 内的相对文件路径，不支持目录、glob 或 `..`。任务开始时记录内容指纹、文件类型与权限，提交时在验证命令前后各检查一次；删除、创建原先不存在的受保护文件或修改内容/权限都会拒绝提交。指纹写入 trajectory 的 `protected_files`；恢复时使用原始记录，不会把外部改动重新认定为基线。旧轨迹若没有所选文件的原始指纹，会拒绝恢复。显式 `--protect` 替换配置中的文件列表。
+
+此检查只控制是否接受完成，不拦截 shell 写入、不自动回滚，也不检测修改后又恢复的临时行为。符号链接只比较链接目标，不读取链接指向的文件内容。保护文件由调用者显式选择，不会根据自然语言自动推断。
+
+Git workspace 的 HTTP 任务默认在独立 worktree 中执行；成功任务沿用自动提交与合并流程。耗尽步数、取消或异常退出的任务保留 worktree 和分支，`worktree_cleaned` 为 `false`，可从任务响应的 `worktree_path` 找回未提交修改。保留的 worktree 需要人工检查和清理，目前不自动回收，也不自动续跑 HTTP 任务。
 
 ### 本地源码检索
 
@@ -315,6 +362,17 @@ agent.save("trajectory.json")
 LocalEnvironment 固定工作目录，限制执行时间和输出大小，并拦截少量明显危险命令，例如系统级 `rm` 和 `git reset --hard`。这些是应用层护栏，不是操作系统沙箱；它仍使用本地 shell 执行命令。需要强隔离时，应在容器、namespace 或独立沙箱中运行。
 
 ## 开发与测试
+
+新增可重复运行的编码任务评测，覆盖单文件修复、跨文件修改、功能新增和只读调查：
+
+```bash
+repo-agent-eval --list
+repo-agent-eval --provider mock --max-steps 5 --output /tmp/repo-agent-eval
+```
+
+每轮使用全新 fixture workspace，独立检查实现行为、修改范围、公开测试和回答事实，并保存轨迹与 JSON 报告。Mock 不会修复任务，预期评分失败、退出码为 1；真实模型需显式指定 provider。当前只有四个手工任务，适合回归检查，不能代表真实仓库成功率。指标含通过率、假完成率、步数、耗时和无关修改数。详见 [评测说明](docs/evaluation.md)。
+
+评测同样支持重复的 `--verify '检查命令'`，在提交时重跑调用者指定的检查并记录配置；独立验收仍在模型停止后运行，不向模型泄露验收源码或结果。
 
 ```bash
 python -m pytest

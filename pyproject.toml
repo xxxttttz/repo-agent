@@ -40,12 +40,14 @@ dev = [
 [project.scripts]
 repo-agent = "repo_agent.run.local:main"
 repo-agent-api = "repo_agent.api:run"
+repo-agent-eval = "repo_agent.evaluation.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 repo_agent = ["config/*.yaml", "py.typed"]
+"repo_agent.evaluation" = ["cases.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

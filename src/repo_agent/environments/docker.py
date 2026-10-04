@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import subprocess
+from importlib.resources import files
 from pathlib import Path
 from uuid import uuid4
 
+from ..tools.edit import EditError, validate_edit
 from .local import LocalEnvironment
 
 
@@ -98,6 +102,18 @@ class DockerEnvironment(LocalEnvironment):
             stderr=subprocess.STDOUT,
             start_new_session=(os.name != "nt"),
         )
+
+    def _execute_edit(self, command: dict):
+        # Use the same bounded container as shell actions. No host-side edit.
+        from .local import ExecutionResult, ExecutionStatus
+
+        try:
+            validate_edit(command)
+        except EditError as error:
+            return ExecutionResult(ExecutionStatus.REJECTED, error=str(error))
+        source = files("repo_agent.tools").joinpath("edit.py").read_text(encoding="utf-8")
+        shell_command = shlex.join(["python3", "-c", source, json.dumps(command, ensure_ascii=False)])
+        return super().execute(shell_command)
 
     def _terminate(self, process: subprocess.Popen) -> None:
         LocalEnvironment._terminate(process)

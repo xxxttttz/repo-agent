@@ -4,15 +4,17 @@ import copy
 import json
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from jinja2 import StrictUndefined, Template
 
 from .. import __version__
-from ..environments.local import ExecutionStatus, LocalEnvironment
+from ..environments.local import ExecutionResult, ExecutionStatus, LocalEnvironment
 from ..models import AgentAction, ModelBackend
 from ..policies import CompletionContext, CompletionPolicy, FileEvidenceCompletionPolicy
+from ..policies.protected import ProtectedFiles
 from ..result import AgentResult, AgentStatus, AgentStep
 
 
@@ -21,6 +23,8 @@ class DefaultAgent:
                  completion_policy: CompletionPolicy | None = None, system_template: str | None = None,
                  instance_template: str | None = None, component_config: dict | None = None,
                  retrieval_context: str = "", conversation_context: str = "",
+                 verification_commands: list[str] | tuple[str, ...] = (),
+                 protected_paths: list[str] | tuple[str, ...] = (),
                  cancellation_check: Callable[[], bool] | None = None):
         self.model = model
         self.env = env
@@ -32,6 +36,14 @@ class DefaultAgent:
         self.retrieval_context = retrieval_context
         self.conversation_context = conversation_context
         self.cancellation_check = cancellation_check or (lambda: False)
+        if (not isinstance(verification_commands, (list, tuple))
+                or any(not isinstance(command, str) or not command.strip()
+                       for command in verification_commands)):
+            raise ValueError("verification_commands must be a list of non-empty shell commands")
+        self.verification_commands = tuple(verification_commands)
+        self.verifications: list[dict] = []
+        self.protected_files = ProtectedFiles(env.cwd, protected_paths)
+        self.protected_baseline: dict[str, str] = {}
         self.messages: list[dict] = []
         self._last_result: AgentResult | None = None
         self._task: str | None = None
@@ -45,6 +57,8 @@ class DefaultAgent:
         self._task = task
         self.resumed_from_step = 0
         self.messages = []
+        self.verifications = []
+        self.protected_baseline = self.protected_files.capture()
         variables = {}
         variables.update(self.env.get_template_vars())
         variables.update(self.model.get_template_vars())
@@ -56,6 +70,7 @@ class DefaultAgent:
             {"role": "system", "content": self._render(self.system_template, **variables)},
             {"role": "user", "content": self._render(self.instance_template, **variables)},
         ])
+        self._describe_verification()
         return self._run_steps(task, [])
 
     def resume(self, task: str, trajectory: dict) -> AgentResult:
@@ -67,6 +82,12 @@ class DefaultAgent:
 
         self._task = task
         self.messages = copy.deepcopy(messages)
+        self.verifications = copy.deepcopy(trajectory.get("verifications", []))
+        baseline = trajectory.get("protected_files", {})
+        if (not isinstance(baseline, dict)
+                or any(not isinstance(baseline.get(path), str) for path in self.protected_files.paths)):
+            raise ValueError("Trajectory lacks the original snapshot for configured protected files")
+        self.protected_baseline = {path: baseline[path] for path in self.protected_files.paths}
         prior_error = None
         while self.messages and self.messages[-1].get("role") == "exit":
             prior_error = self.messages.pop().get("content")
@@ -89,14 +110,115 @@ class DefaultAgent:
         if prior_error:
             resume_message += f" The previous run stopped with this error: {prior_error}"
         self.messages.append({"role": "user", "content": resume_message})
+        self._describe_verification()
         return self._run_steps(task, steps)
+
+    def _describe_verification(self) -> None:
+        if self.protected_files.paths:
+            self.messages.append({
+                "role": "user",
+                "content": "These caller-protected files must remain unchanged from the start of "
+                           "the task. Completion will be rejected if their contents, file type, "
+                           "or permissions differ. Put summaries in your final answer, not in these files:\n"
+                           + "\n".join(self.protected_files.paths),
+            })
+        if self.verification_commands:
+            self.messages.append({
+                "role": "user",
+                "content": "Before accepting each submission, the runner will execute these "
+                           "required checks in order. All must pass:\n"
+                           + "\n".join(self.verification_commands),
+            })
+
+    def _verify_submission(self, step_number: int) -> str | None:
+        """Re-run trusted caller-configured checks; never reuse old successes."""
+        for command in self.verification_commands:
+            if self.cancellation_check():
+                return "Verification cancelled."
+            execution = self.env.execute(command)
+            self.verifications.append({
+                "submission_step": step_number,
+                "command": command,
+                "status": execution.status.value,
+                "returncode": execution.returncode,
+                "output": execution.output,
+                "error": execution.error,
+                "truncated": execution.truncated,
+            })
+            self.messages.append({
+                "role": "user",
+                "content": f"Required verification: {command}\n"
+                           f"Status: {execution.status.value}; return code: {execution.returncode}\n"
+                           f"Error: {execution.error or ''}\n"
+                           f"Output truncated: {execution.truncated}\n{execution.output}",
+            })
+            if execution.status is not ExecutionStatus.SUCCESS:
+                return f"Required verification failed: {command}. Fix the cause before resubmitting."
+        return None
+
+    def _hint_on_repeated_reads(self, steps: list[AgentStep]) -> None:
+        """Nudge repeated inspection without blocking edits or repeated tests."""
+        readers = ("cat ", "head ", "tail ", "nl ", "sed ", "grep ", "rg ")
+        recent = steps[-6:]
+        latest = recent[-1]
+        if (latest.execution_status is not ExecutionStatus.SUCCESS
+                or latest.submission is not None or not latest.output or not latest.output.strip()
+                or not isinstance(latest.command, str) or not latest.command.lstrip().startswith(readers)):
+            return
+        matches = sum(
+            step.execution_status is ExecutionStatus.SUCCESS
+            and step.submission is None and isinstance(step.command, str)
+            and step.command.lstrip().startswith(readers)
+            and (step.output or "").strip() == latest.output.strip()
+            for step in recent
+        )
+        if matches == 3:
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "Inspection is repeating: three recent read commands returned the same text. "
+                    "Changing grep context on the same file has not supplied new evidence. "
+                    "Change the investigation target: read the complete relevant implementation "
+                    "(for example, cat the source file), including validation and error paths, "
+                    "or inspect a different related file. Use the task's source files to resolve "
+                    "unanswered questions; do not assume the README describes every behavior."
+                ),
+            })
+
+    def _hint_on_budget(self, remaining: int, task: str, successful_commands: list[str]) -> None:
+        """Reserve room for validation/submission without forcing completion."""
+        if self.max_steps < 4 or remaining not in (3, 1):
+            return
+        content = (
+            f"Step budget: {remaining} model action(s) remain in this run, including the next action. "
+            "Avoid optional refactoring and repeated inspection. Finish necessary changes, "
+            "inspect required task files, and reserve an action for the independent completion "
+            "marker. Only submit if the task is actually solved; otherwise use the remaining "
+            "actions for useful work and report what is still unverified. Budget exhaustion "
+            "does not count as completion."
+        )
+        # Do not call arbitrary caller policies outside their submission hook.
+        if type(self.completion_policy) is FileEvidenceCompletionPolicy:
+            decision = self.completion_policy.evaluate(CompletionContext(
+                task=task, environment=self.env, successful_commands=tuple(successful_commands)))
+            if not decision.allowed:
+                content += f" Current file-evidence blocker: {decision.reason}"
+        if self.verification_commands:
+            content += (
+                " Caller-required verification runs automatically on submission, outside the "
+                "model-action budget. You do not need to spend an action duplicating those "
+                "checks; a failed check still rejects completion."
+            )
+        else:
+            content += " Run relevant tests after the last code change before submitting."
+        self.messages.append({"role": "user", "content": content})
 
     def _run_steps(self, task: str, existing_steps: list[AgentStep]) -> AgentResult:
         steps = list(existing_steps)
         successful_commands = [
             step.command
             for step in steps
-            if step.command is not None
+            if isinstance(step.command, str)
             and step.execution_status is ExecutionStatus.SUCCESS
             and step.submission is None
         ]
@@ -109,6 +231,8 @@ class DefaultAgent:
         for step_number in range(first_step_number, first_step_number + self.max_steps):
             if self.cancellation_check():
                 return self._cancelled_result(steps)
+            remaining = first_step_number + self.max_steps - step_number
+            self._hint_on_budget(remaining, task, successful_commands)
             try:
                 raw_message = self.model.query(self.messages)
             except Exception as error:  # noqa: BLE001 - provider failures become AgentResult.ERROR.
@@ -126,8 +250,7 @@ class DefaultAgent:
                     tuple(steps),
                     tuple(self.messages),
                 )
-                self._last_result = result
-                return result
+                return self._finish_result(result)
             if isinstance(raw_message, AgentAction):  # compatibility with pre-stage custom models
                 actions = [] if raw_message.command is None else [{"command": raw_message.command}]
                 raw_message = self.model.format_message(raw_message.content, actions)
@@ -137,44 +260,102 @@ class DefaultAgent:
             last_content = str(message.get("content", ""))
             actions = message.get("extra", {}).get("actions", [])
             command = actions[0].get("command") if actions and isinstance(actions[0], dict) else None
-            if not isinstance(command, str):
-                observation = {"role": "user", "content": "No shell action was provided. Continue with a command."}
+            if not isinstance(command, (str, dict)):
+                observation = {"role": "user", "content": "No action was provided. Continue with a shell or edit command."}
                 self.messages.append(observation)
                 steps.append(AgentStep(step_number, last_content, None, completion_rejection="No submission action was provided."))
                 continue
 
-            execution = self.env.execute(message)
-            if execution.status is ExecutionStatus.SUCCESS and execution.submission is None:
+            if (isinstance(command, dict) and isinstance(command.get("path"), str)
+                    and Path(command["path"]).as_posix() in self.protected_files.paths):
+                execution = ExecutionResult(ExecutionStatus.REJECTED,
+                                            error=f"Edit rejected: {command['path']} is a caller-protected file.")
+            else:
+                execution = self.env.execute(message)
+            if (isinstance(command, str) and execution.status is ExecutionStatus.SUCCESS
+                    and execution.submission is None):
                 successful_commands.append(command)
             observation_messages = self.model.format_observation_messages(message, [execution])
             self.messages.extend(copy.deepcopy(observation_messages))
             step = AgentStep(step_number, last_content, command, execution.output, execution.returncode,
                              execution.status, execution.error, execution.truncated, None, execution.submission)
             steps.append(step)
+            self._hint_on_repeated_reads(steps)
             if self.cancellation_check():
                 return self._cancelled_result(steps)
             if execution.submission is not None:
                 decision = self.completion_policy.evaluate(CompletionContext(
                     task=task, environment=self.env, successful_commands=tuple(successful_commands)))
+                reason = decision.reason
                 if decision.allowed:
+                    reason = self.protected_files.check(self.protected_baseline)
+                    if not reason:
+                        reason = self._verify_submission(step_number)
+                    if not reason:
+                        reason = self.protected_files.check(self.protected_baseline)
+                    if self.cancellation_check():
+                        return self._cancelled_result(steps)
+                if decision.allowed and not reason:
                     answer = execution.submission or last_content
                     result = AgentResult(AgentStatus.COMPLETED, answer, tuple(steps), tuple(self.messages))
-                    self._last_result = result
-                    return result
+                    return self._finish_result(result)
                 rejection = {
                     "role": "user",
                     "content": (
-                        f"Completion rejected: {decision.reason}\n"
+                        f"Completion rejected: {reason}\n"
                         "Your next command must be a non-submission shell command "
                         "that addresses this reason. Do not repeat the completion "
                         "marker until you have new successful evidence."
+                        " When you resubmit, provide the complete task summary again, including "
+                        "the actual changes or findings, verification evidence, and any remaining "
+                        "limitations. Do not replace the summary with a note about resubmitting."
                     ),
                 }
                 self.messages.append(rejection)
                 steps[-1] = AgentStep(step.number, step.content, step.command, step.output, step.returncode,
-                                      step.execution_status, step.error, step.output_truncated, decision.reason, step.submission)
+                                      step.execution_status, step.error, step.output_truncated, reason, step.submission)
 
         result = AgentResult(AgentStatus.MAX_STEPS, last_content, tuple(steps), tuple(self.messages))
+        return self._finish_result(result)
+
+    def _finish_result(self, result: AgentResult) -> AgentResult:
+        """Attach runner receipts without rewriting or endorsing model prose."""
+        accepted = result.status is AgentStatus.COMPLETED
+        submission_step = next((step.number for step in reversed(result.steps)
+                                if step.submission is not None), None)
+        checks = [{key: copy.deepcopy(check.get(key)) for key in (
+            "command", "status", "returncode", "error", "truncated")}
+            for check in self.verifications if check.get("submission_step") == submission_step]
+        if not self.verification_commands:
+            verification_state = "not_configured"
+        elif not checks:
+            verification_state = "not_run"
+        elif not accepted:
+            verification_state = "not_accepted"
+        elif ([check["command"] for check in checks] == list(self.verification_commands)
+              and all(check["status"] == ExecutionStatus.SUCCESS.value for check in checks)):
+            verification_state = "passed"
+        else:
+            verification_state = "incomplete"
+        handoff = {
+            "status": result.status.value,
+            "submission_accepted": accepted,
+            "successful_edit_actions": [
+                {"step": step.number, "path": step.command.get("path"), "mode": step.command.get("mode")}
+                for step in result.steps if isinstance(step.command, dict)
+                and step.command.get("type") == "edit"
+                and step.execution_status is ExecutionStatus.SUCCESS
+            ],
+            "verification": {"state": verification_state, "submission_step": submission_step,
+                             "configured_commands": list(self.verification_commands), "checks": checks},
+            "protected_files": {"paths": list(self.protected_files.paths),
+                                "checked_on_accepted_submission": accepted and bool(self.protected_files.paths)},
+            "limitations": [
+                "Edit actions are historical receipts, not a final workspace diff; shell changes are not listed.",
+                "Caller-selected checks do not prove all requirements or the accuracy of the model summary.",
+            ],
+        }
+        result = replace(result, handoff=handoff)
         self._last_result = result
         return result
 
@@ -191,8 +372,7 @@ class DefaultAgent:
             tuple(steps),
             tuple(self.messages),
         )
-        self._last_result = result
-        return result
+        return self._finish_result(result)
 
     @staticmethod
     def _infer_steps(messages: list[dict]) -> list[AgentStep]:
@@ -203,7 +383,7 @@ class DefaultAgent:
                 continue
             actions = message.get("extra", {}).get("actions", [])
             command = actions[0].get("command") if actions and isinstance(actions[0], dict) else None
-            if not isinstance(command, str):
+            if not isinstance(command, (str, dict)):
                 continue
 
             observation = messages[index + 1] if index + 1 < len(messages) else {}
@@ -241,14 +421,22 @@ class DefaultAgent:
 
     def serialize(self) -> dict:
         result = self._last_result
+        component_config = copy.deepcopy(self.component_config) or {
+            "agent": {"class": f"{type(self).__module__}.{type(self).__name__}", "max_steps": self.max_steps},
+            "environment": self.env.serialize(), "model": self.model.serialize(),
+        }
+        component_config.setdefault("agent", {}).update({
+            "verification_commands": list(self.verification_commands),
+            "protected_paths": list(self.protected_files.paths),
+        })
         return {"version": __version__, "status": result.status.value if result else None,
                 "task": self._task, "answer": result.answer if result else "",
+                "handoff": copy.deepcopy(result.handoff) if result else {},
                 "steps": [step.serialize() for step in result.steps] if result else [],
+                "verifications": copy.deepcopy(self.verifications),
+                "protected_files": dict(self.protected_baseline),
                 "messages": list(result.messages) if result else [],
-                "component_config": self._redact(copy.deepcopy(self.component_config) or {
-                    "agent": {"class": f"{type(self).__module__}.{type(self).__name__}", "max_steps": self.max_steps},
-                    "environment": self.env.serialize(), "model": self.model.serialize(),
-                })}
+                "component_config": self._redact(component_config)}
 
     @classmethod
     def _redact(cls, value: Any) -> Any:

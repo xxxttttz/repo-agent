@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from ..tools.edit import EditError, execute_edit, validate_edit
+
 
 class ExecutionStatus(str, Enum):
     SUCCESS = "success"
@@ -69,12 +71,16 @@ class LocalEnvironment:
 
     def execute(self, action: dict | str) -> ExecutionResult:
         if isinstance(action, dict):
+            if action.get("type") == "edit":
+                return self._execute_edit(action)
             actions = action.get("extra", {}).get("actions", [])
             if not actions or not isinstance(actions[0], dict):
                 return ExecutionResult(ExecutionStatus.REJECTED, error="Action contains no shell command.")
             command = actions[0].get("command")
         else:
             command = action
+        if isinstance(command, dict):
+            return self._execute_edit(command)
         if not isinstance(command, str):
             return ExecutionResult(ExecutionStatus.REJECTED, error="Action command must be a string.")
         rejection = DangerousCommandPolicy.reason(command)
@@ -135,6 +141,19 @@ class LocalEnvironment:
         return ExecutionResult(status, output, process.returncode, truncated,
                                None if status is ExecutionStatus.SUCCESS else
                                f"Command exited with return code {process.returncode}.", submission)
+
+    def _execute_edit(self, command: dict) -> ExecutionResult:
+        try:
+            validate_edit(command)
+        except EditError as error:
+            return ExecutionResult(ExecutionStatus.REJECTED, error=str(error))
+        try:
+            output = execute_edit(command, self.cwd).encode("utf-8")
+        except EditError as error:
+            return ExecutionResult(ExecutionStatus.FAILED, returncode=1, error=str(error))
+        return ExecutionResult(ExecutionStatus.SUCCESS,
+                               output[:self.max_output_size].decode("utf-8", errors="replace"),
+                               returncode=0, truncated=len(output) > self.max_output_size)
 
     def serialize(self) -> dict:
         return {"class": f"{type(self).__module__}.{type(self).__name__}", "cwd": self.cwd,

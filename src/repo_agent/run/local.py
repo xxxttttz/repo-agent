@@ -26,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=("openrouter", "groq", "huggingface", "mock"), default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--verify", action="append", default=None, metavar="COMMAND",
+                        help="Required command before completion; repeat for multiple checks.")
+    parser.add_argument("--protect", action="append", default=None, metavar="PATH",
+                        help="Workspace-relative file that must remain unchanged; repeat for multiple files.")
     parser.add_argument("--config", default=None, help="YAML config path or config name.")
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--output", type=Path, default=None, help="Save the trajectory JSON to this path.")
@@ -45,7 +49,8 @@ def print_result(result: AgentResult, *, skip_steps: int = 0) -> None:
             if step.completion_rejection:
                 print(f"\nCompletion rejected: {step.completion_rejection}")
             continue
-        print(f"\n[Step {step.number}/{result.step_count}]\nAgent wants to run:\n{step.command}\n")
+        displayed = json.dumps(step.command, ensure_ascii=False, indent=2) if isinstance(step.command, dict) else step.command
+        print(f"\n[Step {step.number}/{result.step_count}]\nAgent wants to run:\n{displayed}\n")
         if step.execution_status is not None:
             print(f"Execution status: {step.execution_status.value}")
         print(step.output if step.output else "Execution produced no output.")
@@ -53,6 +58,8 @@ def print_result(result: AgentResult, *, skip_steps: int = 0) -> None:
             print(f"Execution error: {step.error}")
         if step.output_truncated:
             print("Output truncated: display contains only the captured limit.")
+        if step.completion_rejection:
+            print(f"Completion rejected: {step.completion_rejection}")
     if result.status is AgentStatus.COMPLETED:
         print(result.answer)
     elif result.status is AgentStatus.CANCELLED:
@@ -65,6 +72,18 @@ def print_result(result: AgentResult, *, skip_steps: int = 0) -> None:
             print(f"\nAgent stopped: reached max_steps={result.step_count} without completing the task.")
     else:
         print(f"\nAgent stopped with error: {result.answer}")
+    if result.handoff:
+        print("\nRunner evidence (separate from the model summary):")
+        verification = result.handoff["verification"]
+        print(f"Submission accepted: {result.handoff['submission_accepted']}")
+        print(f"Caller-required verification: {verification['state']}")
+        for check in verification["checks"]:
+            print(f"  {check['command']}: {check['status']} (return code: {check['returncode']})")
+        edits = result.handoff["successful_edit_actions"]
+        if edits:
+            print("Successful structured edit actions (not a final diff):")
+            for edit in edits:
+                print(f"  Step {edit['step']}: {edit['mode']} {edit['path']}")
 
 
 def _component_configs(config: dict, args: argparse.Namespace) -> tuple[dict, dict, dict]:
@@ -96,6 +115,10 @@ def _component_configs(config: dict, args: argparse.Namespace) -> tuple[dict, di
         environment_config["cwd"] = str(args.workspace)
     if args.max_steps is not None:
         agent_config["max_steps"] = args.max_steps
+    if getattr(args, "verify", None) is not None:
+        agent_config["verification_commands"] = args.verify
+    if getattr(args, "protect", None) is not None:
+        agent_config["protected_paths"] = args.protect
     if args.provider is not None:
         model_config["model_class"] = args.provider
     if args.model is not None:

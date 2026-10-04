@@ -56,3 +56,25 @@ def test_service_local_environment_does_not_inherit_secrets(tmp_path, monkeypatc
 
     environment_config = result.trajectory["component_config"]["environment"]
     assert environment_config["inherit_env"] is False
+
+
+def test_service_honors_required_verification(tmp_path):
+    result = execute_task(ServiceTask(
+        "Inspect project", tmp_path, provider="mock", max_steps=2,
+        verification_commands=["test -f expected.txt"],
+    ))
+    assert result.trajectory["status"] == "max_steps"
+    assert result.trajectory["verifications"][0]["status"] == "failed"
+    assert result.trajectory["handoff"]["verification"]["state"] == "not_accepted"
+    assert result.trajectory["handoff"]["submission_accepted"] is False
+
+
+def test_service_records_caller_protected_files(tmp_path):
+    (tmp_path / "README.md").write_text("original")
+    result = execute_task(ServiceTask("Inspect project", tmp_path, provider="mock", max_steps=2,
+                                     protected_paths=["README.md"]))
+    assert result.trajectory["status"] == "completed"
+    assert result.trajectory["protected_files"]["README.md"].startswith("sha256:")
+    assert result.trajectory["handoff"]["protected_files"] == {
+        "paths": ["README.md"], "checked_on_accepted_submission": True,
+    }
