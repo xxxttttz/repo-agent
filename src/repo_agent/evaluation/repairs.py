@@ -37,6 +37,19 @@ _CI_TESTS = {
     ),
 }
 
+_TIMEOUT_CONTRACT_TESTS = (
+    "import unittest\nfrom settings import load_settings\nfrom client import request_options\n\n"
+    "class PublicAPIContract(unittest.TestCase):\n"
+    "    def test_settings_return_shape(self):\n"
+    "        for env, expected in [({}, 2500), ({'REPO_TIMEOUT_MS': '8000'}, 8000)]:\n"
+    "            with self.subTest(env=env):\n"
+    "                self.assertEqual(load_settings(env), {'timeout_ms': expected})\n\n"
+    "    def test_client_return_shape(self):\n"
+    "        for env, expected in [({}, 2.5), ({'REPO_TIMEOUT_MS': '8000'}, 8.0)]:\n"
+    "            with self.subTest(env=env):\n"
+    "                self.assertEqual(request_options(env), {'timeout_seconds': expected})\n"
+)
+
 
 def load_repair_cases() -> list[dict]:
     cases = []
@@ -46,6 +59,17 @@ def load_repair_cases() -> list[dict]:
         case = copy.deepcopy(original)
         case["files"]["tests/test_ci_failure.py"] = _CI_TESTS[case["id"]]
         case["files"][".gitignore"] = "__pycache__/\n.pytest_cache/\n"
+        case["minimum_tests"] = 3  # Two original tests plus at least one new regression.
+        if case["id"] == "timeout-units":
+            case["files"]["tests/test_api_contract.py"] = _TIMEOUT_CONTRACT_TESTS
+            case["public_contract_version"] = "timeout-return-shape-v1"
+            case["task"] += (
+                " Preserve the exact existing return dictionaries: load_settings returns only "
+                "the timeout_ms key; request_options returns only the timeout_seconds key. "
+                "Do not add extra keys or change the public return structure. "
+                "The public API contract tests are protected and must pass."
+            )
+            case["minimum_tests"] = 5  # Four fixed tests plus at least one model-added regression.
         case["allowed_changes"] = [path for path in case["allowed_changes"] if not path.startswith("tests/")]
         case["allowed_changes"].append("tests/test_regression_*.py")
         case["protected_paths"] = [path for path in case["files"]
@@ -54,7 +78,6 @@ def load_repair_cases() -> list[dict]:
             " Original tests are protected. Add regression tests as new tests/test_regression_*.py files. "
             "Do not commit or merge yourself; the repair controller creates the candidate for human review."
         )
-        case["minimum_tests"] = 3  # Two original tests plus at least one new regression.
         cases.append(case)
     return cases
 
@@ -95,6 +118,7 @@ def run_repair_case(case: dict, artifact_dir: Path, *, provider: str = "mock", m
     record, manager = {}, None
     result = {
         "case_id": case["id"], "passed": False, "review_ready": False, "false_candidate": False,
+        "public_contract_version": case.get("public_contract_version"),
         "task_status": "error", "agent_status": None, "steps": 0, "error": None,
         "configuration": profile.serialize(), "independent_baseline": None,
         "initial_public_checks": None, "acceptance": None, "public_tests": None,

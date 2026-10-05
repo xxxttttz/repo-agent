@@ -35,15 +35,25 @@ repo-agent-repair-eval --provider huggingface --model YOUR_MODEL_ID \
 | 用例 | 可见 CI 失败 | 独立验收另外检查 |
 | --- | --- | --- |
 | `pagination-boundary` | 第一页丢失末项 | 多页边界、空输入、越界、非法参数 |
-| `timeout-units` | 默认超时把毫秒当作秒 | 多种单位换算、配置接口保持不变、非法输入 |
+| `timeout-units` | 默认超时把毫秒当作秒；公开契约要求精确返回字段 | 其他单位换算、接口保持不变、非法输入 |
 
 两个用例从已有核心 fixture 派生，但增加了可复现的失败测试，使用独立 suite hash，不能直接比较两套评分。保护原有测试、CI 失败测试、README 和 `.gitignore`；仅允许实现文件和新增 `tests/test_regression_*.py`，最多改动 5 个文件。独立验收源码和结果不注入模型，只向它提供任务、公开 CI 日志和控制器验收。
+
+超时用例另有受保护的 `tests/test_api_contract.py`，版本为
+`timeout-return-shape-v1`，对应结果记录 `public_contract_version`。题面明确
+`load_settings` 只能返回 `timeout_ms`，`request_options` 只能返回
+`timeout_seconds`，不得新增字段；两项公开契约测试用完整字典比较默认和指定
+超时值，在提交阶段通过生产的必过检查执行。模型可读取该公开测试，但不能
+修改它来绕过检查；独立验收仍在模型停止后另行执行，不注入上下文。
+这只增强内置修复 fixture，不会替任意业务项目自动推断接口契约，也未改变
+核心 `repo-agent-eval` 的 fixture。新增题面和测试改变了 repair suite hash，
+旧版 5/6 报告仍保留，不能直接拿新旧通过率证明单项改动的效果。
 
 成功必须同时满足：
 
 1. 工单进入 `awaiting_review`，生产控制器已接受候选，但尚未合入。
 2. 模型停止后，评测自己的行为验收通过。
-3. 公开测试通过，数量至少 3 项（原有 2 项，加至少 1 项），候选包含新增回归测试文件。
+3. 公开测试通过，分页至少 3 项、超时至少 5 项（固定测试分别 2/4 项，另加至少 1 项模型新增测试），候选包含新增回归测试文件。管理员契约测试不替代模型新增测试。
 4. 源仓库 HEAD、已检出的分支和 tracked/untracked 工作区状态保持不变。
 
 “公开 CI 通过并可供审查”不等于“独立行为验收通过”。报告以 `review_ready` 表示前者，以 `passed` 表示全部评分条件通过；`false_candidate` 指已进入待审查状态却未通过独立评分的候选，不表示它被合入。回归测试数只是最低要求，不衡量覆盖质量。关键词式 `summary_coverage` 仅作诊断，不改变评分。

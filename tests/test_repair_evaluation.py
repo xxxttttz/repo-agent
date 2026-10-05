@@ -66,6 +66,60 @@ def changes(case):
     )}
 
 
+def test_timeout_contract_is_public_protected_and_does_not_modify_core_case():
+    from repo_agent.evaluation.runner import load_cases
+
+    case = next(c for c in CASES if c["id"] == "timeout-units")
+    original = next(c for c in load_cases() if c["id"] == "timeout-units")
+    assert "returns only the timeout_seconds key" in case["task"]
+    assert "Do not add extra keys" in case["task"]
+    assert "tests/test_api_contract.py" in case["protected_paths"]
+    assert case["public_contract_version"] == "timeout-return-shape-v1"
+    assert case["minimum_tests"] == 5
+    assert "tests/test_api_contract.py" not in original["files"]
+    assert "Do not add extra keys" not in original["task"]
+    assert case["acceptance"] == original["acceptance"]
+
+
+@pytest.mark.parametrize("changed_api", ["settings", "client"])
+def test_public_contract_rejects_extra_return_keys_before_candidate_delivery(tmp_path, monkeypatch, changed_api):
+    case = next(c for c in CASES if c["id"] == "timeout-units")
+    modified = changes(case)
+    if changed_api == "client":
+        modified["client.py"] = (
+            "from settings import load_settings\n\ndef request_options(env):\n"
+            "    ms = load_settings(env)['timeout_ms']\n"
+            "    return {'timeout_seconds': ms / 1000, 'timeout_ms': ms}\n"
+        )
+    else:
+        modified["settings.py"] = modified["settings.py"].replace(
+            "return {'timeout_ms': timeout}", "return {'timeout_ms': timeout, 'extra': True}")
+    # One attempt ending at the rejected marker, without scripted-model exhaustion.
+    budget = len(case["files"]) + len(modified) + 2
+    monkeypatch.setattr("repo_agent.service.get_model", lambda config: ScriptedRepairModel(case, modified))
+    result = run_repair_case(case, tmp_path / "run", max_steps=budget)
+    assert result["task_status"] == "max_steps", result
+    assert not result["review_ready"] and not result["passed"]
+    assert result["source_unchanged"]
+    assert result["public_contract_version"] == "timeout-return-shape-v1"
+    assert not (tmp_path / "run/candidate.patch").exists()
+    trajectory = json.loads((tmp_path / "run/trajectory.json").read_text())
+    assert "Required verification failed" in trajectory["steps"][-1]["completion_rejection"]
+    assert "test_api_contract" in trajectory["verifications"][0]["output"]
+    assert trajectory["verifications"][0]["returncode"] == 1
+
+
+def test_fixed_contract_tests_do_not_replace_new_regression_requirement(tmp_path, monkeypatch):
+    case = next(c for c in CASES if c["id"] == "timeout-units")
+    modified = {**SOLUTIONS[case["id"]], "tests/test_regression_empty.py": "# No model-added tests\n"}
+    monkeypatch.setattr("repo_agent.service.get_model", lambda config: ScriptedRepairModel(case, modified))
+    result = run_repair_case(case, tmp_path / "run")
+    assert result["review_ready"] and result["acceptance"]["passed"]
+    assert "Ran 4 tests" in result["public_tests"]["output"]
+    assert not result["public_tests"]["passed"]
+    assert result["false_candidate"] and not result["passed"]
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["id"])
 def test_repair_evaluation_uses_real_workflow_and_never_approves(tmp_path, monkeypatch, case):
     monkeypatch.setattr("repo_agent.service.get_model", lambda config: ScriptedRepairModel(case, changes(case)))

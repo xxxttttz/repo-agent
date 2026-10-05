@@ -8,6 +8,11 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Versioned, protected public return-shape checks and explicit API contracts in
+  the timeout repair fixture. Extra return keys reject submission; fixed contract
+  tests do not replace the model-added regression requirement. Core fixtures and
+  archived scores are unchanged; the repair suite hash changes.
+
 - Upfront and resume-aware standalone-read plans for the built-in file-evidence
   policy, complete resolved-file blockers on rejection, and progress/resubmission
   guidance after evidence repair. Compound reads still do not count; guidance
