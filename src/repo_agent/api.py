@@ -478,7 +478,20 @@ class TaskManager:
                 ) or (deadline is not None and time.monotonic() >= deadline)
 
             failure_log = record.get("failure_log", "")
+            submission_scope_check = None
+            submission_scope_description = ""
             if profile:
+                def submission_scope_check() -> dict:
+                    changed_paths = self.worktree_manager.changed_paths(task_worktree)
+                    scope_error = profile.check_scope(changed_paths)
+                    return {"passed": scope_error is None, "changed_paths": changed_paths, "error": scope_error}
+
+                submission_scope_description = (
+                    f"Allowed final paths: {list(profile.allowed_paths)}; "
+                    f"maximum changed files: {profile.max_changed_files}. "
+                    "The service includes tracked, staged, committed and non-ignored untracked "
+                    "changes relative to the original base."
+                )
                 baseline = run_checks(execution_workspace, profile.reproduce_commands, environment_config,
                                       timeout=profile.command_timeout, cancelled=cancellation_check)
                 self._update(task_id, baseline=baseline)
@@ -511,6 +524,8 @@ class TaskManager:
                     verification_commands=request.verification_commands,
                     protected_paths=request.protected_paths,
                     failure_log=failure_log,
+                    submission_scope_check=submission_scope_check,
+                    submission_scope_description=submission_scope_description,
                 ),
                 cache=self.cache,
             )

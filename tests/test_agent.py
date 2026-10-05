@@ -178,6 +178,131 @@ def test_recovery_hint_never_bypasses_protected_files(tmp_path):
     assert result.handoff["submission_accepted"] is False
 
 
+def test_submission_scope_rejection_can_recover_without_auto_cleanup(tmp_path):
+    outside = tmp_path / "backup.txt"
+    outside.write_text("model backup\n")
+
+    def check():
+        paths = ["backup.txt"] if outside.exists() else []
+        return {"passed": not paths, "changed_paths": paths, "error": "Outside scope: backup.txt" if paths else None}
+
+    model = SequenceModel([
+        action("inspect", "ls"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("move my backup out of the final patch", "mkdir .ignored && mv backup.txt .ignored/backup.txt"),
+        action("final summary", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ])
+    agent = DefaultAgent(model, LocalEnvironment(str(tmp_path)), max_steps=4,
+                         submission_scope_check=check, verification_commands=["true"])
+    result = agent.run("Inspect project")
+    assert result.status is AgentStatus.COMPLETED
+    assert "Submission scope check rejected" in result.steps[1].completion_rejection
+    assert (tmp_path / ".ignored/backup.txt").read_text() == "model backup\n"
+    receipts = agent.serialize()["submission_scope_checks"]
+    assert [(r["submission_step"], r["state"]) for r in receipts] == [(2, "failed"), (4, "passed"), (4, "passed")]
+    assert all(r["submission_step"] == 4 for r in result.handoff["submission_scope"]["checks"])
+    assert result.handoff["submission_scope"]["state"] == "passed"
+    assert [r["submission_step"] for r in agent.serialize()["verifications"]] == [4]
+
+
+def test_submission_scope_detects_changes_from_required_verification(tmp_path):
+    outside = tmp_path / "backup.txt"
+
+    def check():
+        paths = ["backup.txt"] if outside.exists() else []
+        return {"passed": not paths, "changed_paths": paths, "error": "Outside scope: backup.txt" if paths else None}
+
+    agent = DefaultAgent(SequenceModel([
+        action("inspect", "ls"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2, submission_scope_check=check,
+        verification_commands=["touch backup.txt"])
+    result = agent.run("Inspect project")
+    assert result.status is AgentStatus.MAX_STEPS
+    checks = agent.serialize()["submission_scope_checks"]
+    assert [(r["phase"], r["passed"]) for r in checks] == [("before_verification", True), ("after_verification", False)]
+    assert outside.exists()  # The runner does not silently remove the out-of-scope file.
+    assert result.handoff["submission_scope"]["state"] == "not_accepted"
+
+
+@pytest.mark.parametrize("receipt", [{}, {"passed": "yes", "changed_paths": []},
+                                     {"passed": True, "changed_paths": [], "error": "failed"},
+                                     {"passed": True, "changed_paths": [123]}])
+def test_invalid_submission_scope_receipts_fail_closed(tmp_path, receipt):
+    result = DefaultAgent(SequenceModel([
+        action("inspect", "ls"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2, submission_scope_check=lambda: receipt).run("Inspect project")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert "Invalid submission scope receipt" in result.steps[-1].completion_rejection
+    assert result.handoff["submission_scope"]["checks"][0]["state"] == "error"
+
+
+def test_submission_scope_inspection_errors_fail_closed(tmp_path):
+    def broken():
+        raise RuntimeError("Git unavailable")
+
+    result = DefaultAgent(SequenceModel([
+        action("inspect", "ls"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2, submission_scope_check=broken).run("Inspect project")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert "Git unavailable" in result.steps[-1].completion_rejection
+    assert result.handoff["submission_scope"]["checks"][0]["changed_paths"] is None
+
+
+def test_later_evidence_rejection_does_not_reuse_earlier_scope_pass(tmp_path):
+    (tmp_path / "app.py").write_text("# content\n")
+
+    class Policy:
+        calls = 0
+
+        def evaluate(self, context):
+            from repo_agent.policies import CompletionDecision
+            self.calls += 1
+            return CompletionDecision(self.calls == 1, "New evidence missing" if self.calls > 1 else "")
+
+    agent = DefaultAgent(SequenceModel([
+        action("inspect", "cat app.py"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        action("inspect", "cat app.py"), action("submit again", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=4, completion_policy=Policy(),
+        submission_scope_check=lambda: {"passed": True, "changed_paths": [], "error": None},
+        verification_commands=["false"])
+    result = agent.run("Explain app.py")
+    assert result.status is AgentStatus.MAX_STEPS
+    assert result.handoff["submission_scope"]["state"] == "not_run"
+    assert result.handoff["submission_scope"]["checks"] == []
+    assert len(agent.serialize()["submission_scope_checks"]) == 1
+
+
+def test_runtime_scope_callback_is_not_serialized_and_cannot_be_dropped_on_resume(tmp_path):
+    check = lambda: {"passed": False, "changed_paths": ["backup.txt"], "error": "Outside scope"}
+    first = DefaultAgent(SequenceModel([
+        action("inspect", "ls"), action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+    ]), LocalEnvironment(str(tmp_path)), max_steps=2, submission_scope_check=check)
+    first.run("Inspect project")
+    saved = json.loads(json.dumps(first.serialize()))
+    assert saved["submission_scope_check_configured"] is True
+    assert "submission_scope_check" not in saved["component_config"]["agent"]
+    with pytest.raises(ValueError, match="trusted runtime"):
+        DefaultAgent(SequenceModel([]), LocalEnvironment(str(tmp_path))).resume("Inspect project", saved)
+    resumed = DefaultAgent(SequenceModel([action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")]),
+                           LocalEnvironment(str(tmp_path)), max_steps=1,
+                           submission_scope_check=lambda: {"passed": True, "changed_paths": [], "error": None})
+    result = resumed.resume("Inspect project", saved)
+    assert result.status is AgentStatus.COMPLETED
+    assert result.handoff["submission_scope"]["submission_step"] == 3
+
+
+def test_missing_file_evidence_does_not_run_scope_check(tmp_path):
+    (tmp_path / "app.py").write_text("# content\n")
+    result = DefaultAgent(SequenceModel([action("submit", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")]),
+                          LocalEnvironment(str(tmp_path)), max_steps=1,
+                          submission_scope_check=lambda: pytest.fail("File evidence rejected first")).run("Explain app.py")
+    assert result.handoff["submission_scope"]["state"] == "not_run"
+
+
+def test_scope_callback_configuration_must_be_callable(tmp_path):
+    with pytest.raises(ValueError, match="trusted runtime callable"):
+        DefaultAgent(SequenceModel([]), LocalEnvironment(str(tmp_path)), submission_scope_check="git diff")
+
+
 def test_recovery_hint_without_required_checks_does_not_claim_tests_passed(tmp_path):
     (tmp_path / "app.py").write_text("# content\n")
     result = DefaultAgent(SequenceModel([

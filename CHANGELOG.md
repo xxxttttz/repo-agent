@@ -8,6 +8,12 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Trusted host-side repair scope preflight before and after submission checks,
+  with changed-path/file-budget diagnostics for in-budget model recovery.
+  Git failures fail closed; per-submission receipts never reuse earlier passes.
+  Runtime callbacks cannot be serialized or silently omitted on resume. Final
+  scope checks and approval remain independent; no automatic cleanup or rollback.
+
 - Protected regression gates in repair fixtures, rerun during submission,
   final verification and approval, rejecting absent/empty/skipped-only or
   expected-failure-only new tests before candidate delivery. Timeout contract v2

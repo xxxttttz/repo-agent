@@ -25,7 +25,9 @@ class DefaultAgent:
                  retrieval_context: str = "", conversation_context: str = "",
                  verification_commands: list[str] | tuple[str, ...] = (),
                  protected_paths: list[str] | tuple[str, ...] = (),
-                 cancellation_check: Callable[[], bool] | None = None):
+                 cancellation_check: Callable[[], bool] | None = None,
+                 submission_scope_check: Callable[[], dict] | None = None,
+                 submission_scope_description: str = ""):
         self.model = model
         self.env = env
         self.max_steps = max_steps
@@ -36,6 +38,11 @@ class DefaultAgent:
         self.retrieval_context = retrieval_context
         self.conversation_context = conversation_context
         self.cancellation_check = cancellation_check or (lambda: False)
+        if submission_scope_check is not None and not callable(submission_scope_check):
+            raise ValueError("submission_scope_check must be a trusted runtime callable")
+        self.submission_scope_check = submission_scope_check
+        self.submission_scope_description = submission_scope_description
+        self.submission_scope_checks: list[dict] = []
         if (not isinstance(verification_commands, (list, tuple))
                 or any(not isinstance(command, str) or not command.strip()
                        for command in verification_commands)):
@@ -58,6 +65,7 @@ class DefaultAgent:
         self.resumed_from_step = 0
         self.messages = []
         self.verifications = []
+        self.submission_scope_checks = []
         self.protected_baseline = self.protected_files.capture()
         variables = {}
         variables.update(self.env.get_template_vars())
@@ -77,6 +85,8 @@ class DefaultAgent:
     def resume(self, task: str, trajectory: dict) -> AgentResult:
         if trajectory.get("status") == AgentStatus.COMPLETED.value:
             raise ValueError("Cannot resume a completed trajectory.")
+        if trajectory.get("submission_scope_check_configured") and self.submission_scope_check is None:
+            raise ValueError("Trajectory requires its trusted runtime submission scope check; it cannot be omitted on resume")
         messages = trajectory.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("Trajectory must contain a non-empty messages list.")
@@ -84,6 +94,7 @@ class DefaultAgent:
         self._task = task
         self.messages = copy.deepcopy(messages)
         self.verifications = copy.deepcopy(trajectory.get("verifications", []))
+        self.submission_scope_checks = copy.deepcopy(trajectory.get("submission_scope_checks", []))
         baseline = trajectory.get("protected_files", {})
         if (not isinstance(baseline, dict)
                 or any(not isinstance(baseline.get(path), str) for path in self.protected_files.paths)):
@@ -170,6 +181,19 @@ class DefaultAgent:
         self.messages.append({"role": "user", "content": content})
 
     def _describe_verification(self) -> None:
+        if self.submission_scope_check is not None:
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "The service checks the full changed-path set on every submission, before "
+                    "and after required verification. Out-of-scope changes or excess files reject "
+                    "completion and return diagnostics; do not create backup files outside the "
+                    "allowed scope. No automatic deletion, rollback, submission or budget extension "
+                    "occurs. Fix only your own task changes in this isolated workspace, preserving "
+                    "protected files and unrelated work. Final delivery and approval recheck scope.\n"
+                    + self.submission_scope_description
+                ),
+            })
         if self.protected_files.paths:
             self.messages.append({
                 "role": "user",
@@ -185,6 +209,30 @@ class DefaultAgent:
                            "required checks in order. All must pass:\n"
                            + "\n".join(self.verification_commands),
             })
+
+    def _check_submission_scope(self, step_number: int, phase: str) -> str | None:
+        if self.submission_scope_check is None:
+            return None
+        try:
+            receipt = copy.deepcopy(self.submission_scope_check())
+            if (not isinstance(receipt, dict) or type(receipt.get("passed")) is not bool
+                    or not isinstance(receipt.get("changed_paths"), list)
+                    or any(not isinstance(path, str) for path in receipt["changed_paths"])
+                    or receipt.get("error") is not None and not isinstance(receipt["error"], str)
+                    or receipt["passed"] and receipt.get("error")):
+                raise ValueError("Invalid submission scope receipt")
+            receipt = {key: receipt.get(key) for key in ("passed", "changed_paths", "error")}
+            receipt["state"] = "passed" if receipt["passed"] else "failed"
+        except Exception as error:  # noqa: BLE001 - scope inspection errors must fail closed.
+            receipt = {"state": "error", "passed": False, "changed_paths": None,
+                       "error": f"{type(error).__name__}: {error}"}
+        receipt.update(submission_step=step_number, phase=phase)
+        self.submission_scope_checks.append(receipt)
+        self.messages.append({"role": "user", "content": "Submission scope evidence: "
+                              + json.dumps(receipt, ensure_ascii=False)})
+        if not receipt["passed"]:
+            return "Submission scope check rejected: " + (receipt["error"] or "Changed paths did not pass scope policy")
+        return None
 
     def _verify_submission(self, step_number: int) -> str | None:
         """Re-run trusted caller-configured checks; never reuse old successes."""
@@ -347,9 +395,13 @@ class DefaultAgent:
                 if decision.allowed:
                     reason = self.protected_files.check(self.protected_baseline)
                     if not reason:
+                        reason = self._check_submission_scope(step_number, "before_verification")
+                    if not reason:
                         reason = self._verify_submission(step_number)
                     if not reason:
                         reason = self.protected_files.check(self.protected_baseline)
+                    if not reason:
+                        reason = self._check_submission_scope(step_number, "after_verification")
                     if self.cancellation_check():
                         return self._cancelled_result(steps)
                 if decision.allowed and not reason:
@@ -398,6 +450,19 @@ class DefaultAgent:
             verification_state = "passed"
         else:
             verification_state = "incomplete"
+        scope_checks = [copy.deepcopy(check) for check in self.submission_scope_checks
+                        if check.get("submission_step") == submission_step]
+        if self.submission_scope_check is None:
+            scope_state = "not_configured"
+        elif not scope_checks:
+            scope_state = "not_run"
+        elif not accepted:
+            scope_state = "not_accepted"
+        elif ([check.get("phase") for check in scope_checks] == ["before_verification", "after_verification"]
+              and all(check.get("state") == "passed" for check in scope_checks)):
+            scope_state = "passed"
+        else:
+            scope_state = "incomplete"
         handoff = {
             "status": result.status.value,
             "submission_accepted": accepted,
@@ -409,6 +474,7 @@ class DefaultAgent:
             ],
             "verification": {"state": verification_state, "submission_step": submission_step,
                              "configured_commands": list(self.verification_commands), "checks": checks},
+            "submission_scope": {"state": scope_state, "submission_step": submission_step, "checks": scope_checks},
             "protected_files": {"paths": list(self.protected_files.paths),
                                 "checked_on_accepted_submission": accepted and bool(self.protected_files.paths)},
             "limitations": [
@@ -495,6 +561,8 @@ class DefaultAgent:
                 "handoff": copy.deepcopy(result.handoff) if result else {},
                 "steps": [step.serialize() for step in result.steps] if result else [],
                 "verifications": copy.deepcopy(self.verifications),
+                "submission_scope_check_configured": self.submission_scope_check is not None,
+                "submission_scope_checks": copy.deepcopy(self.submission_scope_checks),
                 "protected_files": dict(self.protected_baseline),
                 "messages": list(result.messages) if result else [],
                 "component_config": self._redact(component_config)}

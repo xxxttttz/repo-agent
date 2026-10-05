@@ -78,3 +78,15 @@ def test_service_records_caller_protected_files(tmp_path):
     assert result.trajectory["handoff"]["protected_files"] == {
         "paths": ["README.md"], "checked_on_accepted_submission": True,
     }
+
+
+def test_service_passes_runtime_scope_check_without_serializing_it(tmp_path):
+    result = execute_task(ServiceTask(
+        "Inspect project", tmp_path, provider="mock", max_steps=2,
+        submission_scope_check=lambda: {"passed": False, "changed_paths": ["backup.txt"], "error": "Outside scope"},
+        submission_scope_description="Allowed paths: app.py",
+    ))
+    assert result.trajectory["status"] == "max_steps"
+    assert result.trajectory["submission_scope_checks"][0]["passed"] is False
+    assert "submission_scope_check" not in result.trajectory["component_config"]["agent"]
+    assert any("Allowed paths: app.py" in m["content"] for m in result.trajectory["messages"])

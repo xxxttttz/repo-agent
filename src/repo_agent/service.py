@@ -37,6 +37,8 @@ class ServiceTask:
     verification_commands: list[str] | None = None
     protected_paths: list[str] | None = None
     failure_log: str = ""
+    submission_scope_check: Callable[[], dict] | None = None
+    submission_scope_description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,8 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
     )
     config = load_config()
     agent_config, environment_config, model_config = _component_configs(config, args)
+    if spec.submission_scope_check is not None:
+        agent_config["submission_scope_description"] = spec.submission_scope_description
     environment_config.update(copy.deepcopy(spec.environment_config))
     if environment_config.get("environment_class", "local") == "local":
         environment_config.setdefault("inherit_env", False)
@@ -100,11 +104,14 @@ def execute_task(spec: ServiceTask, *, cache: ChunkCache | None = None) -> Servi
         "model": copy.deepcopy(model_config),
         "run": copy.deepcopy(config.get("run", {})),
     }
+    runtime = {"cancellation_check": spec.cancellation_check}
+    if spec.submission_scope_check is not None:
+        runtime["submission_scope_check"] = spec.submission_scope_check
     agent = get_agent(
         model,
         environment,
         {**agent_config, "component_config": component_config},
-        runtime={"cancellation_check": spec.cancellation_check},
+        runtime=runtime,
     )
     agent.run(spec.task)
     return ServiceTaskResult(

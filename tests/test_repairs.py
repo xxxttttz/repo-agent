@@ -269,6 +269,98 @@ def test_repair_cannot_be_accepted_by_claiming_completion(tmp_path, monkeypatch,
         manager.close()
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_submission_scope_rejection_allows_model_to_fix_its_backup(tmp_path, monkeypatch, staged):
+    repo = repository(tmp_path)
+    base = git(repo, "rev-parse", "HEAD")
+
+    def model(config):
+        result = RepairModel()
+        commands = list(result.commands)
+        extras = ["cp README.md README.md.preserve"]
+        if staged:
+            extras.append("git add README.md.preserve")
+        commands[4:4] = extras
+        commands += ["mkdir -p __pycache__ && mv README.md.preserve __pycache__/README.md.preserve",
+                     "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+        result.commands = iter(commands)
+        return result
+
+    monkeypatch.setattr("repo_agent.service.get_model", model)
+    manager = TaskManager(tmp_path, redis_url=None, worktree_root=tmp_path / "managed", repair_profiles={"demo": profile()})
+    try:
+        record = submit(manager)
+        assert record["status"] == "awaiting_review", record
+        receipts = record["result"]["submission_scope_checks"]
+        assert receipts[0]["passed"] is False
+        assert "README.md.preserve" in receipts[0]["changed_paths"]
+        assert "Changes outside allowed paths" in receipts[0]["error"]
+        assert [r["passed"] for r in receipts] == [False, True, True]
+        assert record["result"]["handoff"]["submission_scope"]["state"] == "passed"
+        assert record["scope_review"]["passed"]
+        assert "README.md.preserve" not in record["candidate"]["changed_paths"]
+        assert (Path(record["worktree_path"]) / "__pycache__/README.md.preserve").read_text() == (repo / "README.md").read_text()
+        assert git(repo, "rev-parse", "HEAD") == base
+        assert git(repo, "status", "--porcelain") == ""
+        assert record["review"] is None and record["worktree_merged"] is False
+    finally:
+        manager.close()
+
+
+def test_submission_scope_enforces_changed_file_budget(tmp_path, monkeypatch):
+    repo = repository(tmp_path)
+    monkeypatch.setattr("repo_agent.service.get_model", lambda config: RepairModel())
+    manager = TaskManager(tmp_path, redis_url=None, worktree_root=tmp_path / "managed",
+                          repair_profiles={"demo": profile(max_changed_files=1, max_steps=6)})
+    try:
+        record = submit(manager)
+        assert record["status"] == "max_steps"
+        assert record["candidate"] is None
+        assert "Changed-file budget exceeded" in record["result"]["steps"][-1]["completion_rejection"]
+        assert record["result"]["verifications"] == []
+        assert (repo / "app.py").read_text() == BAD
+    finally:
+        manager.close()
+
+
+def test_submission_scope_catches_files_created_by_verification(tmp_path, monkeypatch):
+    repo = repository(tmp_path)
+    monkeypatch.setattr("repo_agent.service.get_model", lambda config: RepairModel())
+    manager = TaskManager(tmp_path, redis_url=None, worktree_root=tmp_path / "managed", repair_profiles={
+        "demo": profile(max_steps=6, verification_commands=(CHECK, "cp README.md README.md.preserve")),
+    })
+    try:
+        record = submit(manager)
+        assert record["status"] == "max_steps" and record["candidate"] is None
+        receipts = record["result"]["submission_scope_checks"]
+        assert [(r["phase"], r["passed"]) for r in receipts] == [("before_verification", True), ("after_verification", False)]
+        assert (Path(record["worktree_path"]) / "README.md.preserve").exists()
+        assert (repo / "app.py").read_text() == BAD
+    finally:
+        manager.close()
+
+
+def test_submission_scope_git_error_does_not_accept_completion(tmp_path, monkeypatch):
+    repo = repository(tmp_path)
+    monkeypatch.setattr("repo_agent.service.get_model", lambda config: RepairModel())
+    manager = TaskManager(tmp_path, redis_url=None, worktree_root=tmp_path / "managed",
+                          repair_profiles={"demo": profile(max_steps=6)})
+
+    def broken(*args, **kwargs):
+        raise WorktreeError("Cannot inspect Git diff")
+
+    monkeypatch.setattr(manager.worktree_manager, "changed_paths", broken)
+    try:
+        record = submit(manager)
+        assert record["status"] == "max_steps" and record["candidate"] is None
+        receipt = record["result"]["submission_scope_checks"][0]
+        assert receipt["state"] == "error" and receipt["changed_paths"] is None
+        assert "Cannot inspect Git diff" in receipt["error"]
+        assert (repo / "app.py").read_text() == BAD
+    finally:
+        manager.close()
+
+
 @pytest.mark.parametrize("command", ["nonexistent-repair-executable", "sleep 2", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
 def test_unusable_baseline_is_not_classified_as_reproduced(tmp_path, command):
     result = run_checks(tmp_path, [command], {}, timeout=.05, cancelled=lambda: False)

@@ -31,6 +31,10 @@ from the model's answer. No additional model turn is spent generating receipts;
 - `protected_files`: configured paths and whether they were checked on the
   accepted submission. This flag is false if there is no accepted submission
   or no configured protection; it does not describe all workspace files.
+- `submission_scope`: service-owned repair scope receipts for the latest
+  submission, before and after required verification. Uses the same state names
+  below: `passed` requires both phases on an accepted submission. It is distinct
+  from the controller's final `scope_review` and does not imply approval/merge.
 - `limitations`: explicit scope notices. Neither these checks nor the receipt
   prove every requirement, the quality of generated tests or the accuracy of
   model claims. Caller checks should be trusted, read-only commands.
@@ -49,6 +53,14 @@ so receipts say `not_run`. A failing test or cancellation during checking has
 submission never reuses receipts from a previous attempted submission. Resume
 rebuilds receipts from steps and verification records; it does not trust the
 saved handoff dictionary.
+
+Repair trajectories additionally retain `submission_scope_checks` and
+`submission_scope_check_configured`. Scope callbacks are trusted runtime inputs,
+not serialized Python callables. A configured callback cannot silently be dropped
+on resume; ordinary CLI tasks without it retain their existing behavior. Inspection
+errors and malformed receipts fail closed. Failed inspections have unknown paths
+(`null`), not an empty change set. The runner neither deletes files nor rolls back
+changes to resolve a scope rejection; the model must fix its own task changes.
 
 ## Evaluation diagnostic
 
