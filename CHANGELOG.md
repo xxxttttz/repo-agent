@@ -8,6 +8,12 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Protected regression gates in repair fixtures, rerun during submission,
+  final verification and approval, rejecting absent/empty/skipped-only or
+  expected-failure-only new tests before candidate delivery. Timeout contract v2
+  publicly verifies zero, negative and invalid inputs; historical grades remain
+  unchanged and independent acceptance still runs separately.
+
 - Versioned, protected public return-shape checks and explicit API contracts in
   the timeout repair fixture. Extra return keys reject submission; fixed contract
   tests do not replace the model-added regression requirement. Core fixtures and

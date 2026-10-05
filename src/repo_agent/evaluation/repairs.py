@@ -48,6 +48,28 @@ _TIMEOUT_CONTRACT_TESTS = (
     "        for env, expected in [({}, 2.5), ({'REPO_TIMEOUT_MS': '8000'}, 8.0)]:\n"
     "            with self.subTest(env=env):\n"
     "                self.assertEqual(request_options(env), {'timeout_seconds': expected})\n"
+    "\n    def test_settings_reject_invalid_timeouts(self):\n"
+    "        for raw in ['0', '-1', 'invalid', '1.5', '']:\n"
+    "            with self.subTest(raw=raw):\n"
+    "                with self.assertRaises(ValueError):\n"
+    "                    load_settings({'REPO_TIMEOUT_MS': raw})\n"
+    "\n    def test_client_reject_invalid_timeouts(self):\n"
+    "        for raw in ['0', '-1', 'invalid', '1.5', '']:\n"
+    "            with self.subTest(raw=raw):\n"
+    "                with self.assertRaises(ValueError):\n"
+    "                    request_options({'REPO_TIMEOUT_MS': raw})\n"
+)
+
+_REGRESSION_GATE = (
+    "import sys\nimport unittest\nfrom pathlib import Path\n\n"
+    "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+    "suite = unittest.defaultTestLoader.discover('tests', pattern='test_regression_*.py')\n"
+    "result = unittest.TextTestRunner(verbosity=2).run(suite)\n"
+    "if not result.wasSuccessful():\n"
+    "    raise SystemExit('New regression tests failed; fix them before submitting.')\n"
+    "if result.testsRun <= len(result.skipped) + len(result.expectedFailures):\n"
+    "    raise SystemExit('Add at least one runnable, non-skipped, non-expected-failure unittest test in tests/test_regression_*.py.')\n"
+    "print('REGRESSION_TESTS_PASSED')\n"
 )
 
 
@@ -59,23 +81,29 @@ def load_repair_cases() -> list[dict]:
         case = copy.deepcopy(original)
         case["files"]["tests/test_ci_failure.py"] = _CI_TESTS[case["id"]]
         case["files"][".gitignore"] = "__pycache__/\n.pytest_cache/\n"
+        case["files"]["ci/check_regressions.py"] = _REGRESSION_GATE
+        case["regression_gate_version"] = "runnable-regression-v1"
         case["minimum_tests"] = 3  # Two original tests plus at least one new regression.
         if case["id"] == "timeout-units":
             case["files"]["tests/test_api_contract.py"] = _TIMEOUT_CONTRACT_TESTS
-            case["public_contract_version"] = "timeout-return-shape-v1"
+            case["public_contract_version"] = "timeout-contract-v2"
             case["task"] += (
                 " Preserve the exact existing return dictionaries: load_settings returns only "
                 "the timeout_ms key; request_options returns only the timeout_seconds key. "
                 "Do not add extra keys or change the public return structure. "
                 "The public API contract tests are protected and must pass."
             )
-            case["minimum_tests"] = 5  # Four fixed tests plus at least one model-added regression.
+            case["minimum_tests"] = 7  # Six fixed tests plus at least one model-added regression.
         case["allowed_changes"] = [path for path in case["allowed_changes"] if not path.startswith("tests/")]
         case["allowed_changes"].append("tests/test_regression_*.py")
         case["protected_paths"] = [path for path in case["files"]
-                                   if path.startswith("tests/") or path in {"README.md", ".gitignore"}]
+                                   if path.startswith("tests/")
+                                   or path in {"README.md", ".gitignore", "ci/check_regressions.py"}]
         case["task"] += (
             " Original tests are protected. Add regression tests as new tests/test_regression_*.py files. "
+            "The trusted regression gate requires at least one runnable, non-skipped, non-expected-failure "
+            "unittest test in these new files; fixed tests, empty files and skipped-only or "
+            "expected-failure-only tests do not satisfy it. "
             "Do not commit or merge yourself; the repair controller creates the candidate for human review."
         )
         cases.append(case)
@@ -98,11 +126,12 @@ def _profile(case: dict, *, provider: str, model: str | None, max_steps: int,
     if provider != "mock" and (not isinstance(model, str) or not model.strip()):
         raise ValueError("Online repair evaluation requires an explicit model for reproducibility")
     command = shlex.join([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"])
+    regression_command = shlex.join([sys.executable, "-B", "ci/check_regressions.py"])
     return RepairProfile(
         id=case["id"], workspace="source", title=f"CI fixture: {case['id']}",
         provider=provider, model=model, max_steps=max_steps, command_timeout=timeout,
         deadline_seconds=deadline, max_changed_files=5,
-        reproduce_commands=(command,), verification_commands=(command, "git diff --check"),
+        reproduce_commands=(command,), verification_commands=(command, regression_command, "git diff --check"),
         allowed_paths=tuple(case["allowed_changes"]), protected_paths=tuple(case["protected_paths"]),
     )
 
@@ -119,6 +148,7 @@ def run_repair_case(case: dict, artifact_dir: Path, *, provider: str = "mock", m
     result = {
         "case_id": case["id"], "passed": False, "review_ready": False, "false_candidate": False,
         "public_contract_version": case.get("public_contract_version"),
+        "regression_gate_version": case.get("regression_gate_version"),
         "task_status": "error", "agent_status": None, "steps": 0, "error": None,
         "configuration": profile.serialize(), "independent_baseline": None,
         "initial_public_checks": None, "acceptance": None, "public_tests": None,
