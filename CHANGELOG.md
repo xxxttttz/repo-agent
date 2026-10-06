@@ -8,6 +8,13 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Profile-only authenticated `/project-checks` and console onboarding without
+  failure logs or model calls. Frozen reproduction checks run in retained managed
+  worktrees using the trusted executor, repository lease and cooperative budgets.
+  Reports distinguish unusable checks, cancellation and source/worktree changes;
+  failures never auto-start repair or create candidates. Existing task queues,
+  history, cancellation and SSE include the `project_check` kind.
+
 - Model-free `repo-agent-preflight` project onboarding with opt-in trusted local
   checks, fail-closed Git inspection, dirty/detached-source blocking, before/after
   source observations and JSON reports. Passing checks report `not_reproduced`;

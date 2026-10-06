@@ -26,6 +26,7 @@ from . import __version__
 from .artifacts import candidate_export
 from .memory import InMemorySessionMemory, MemoryTurn, RedisSessionMemory, SessionMemory
 from .policies.protected import ProtectedFiles
+from .preflight import inspect_project
 from .repairs import RepairProfile, load_profiles, run_checks
 from .retrieval import RedisChunkCache
 from .service import ServiceTask, execute_task
@@ -53,6 +54,10 @@ TERMINAL_STATUSES = {
     "approved",
     "rejected",
     "not_reproduced",
+    "checks_failed",
+    "source_changed",
+    "blocked",
+    "not_configured",
 }
 logger = logging.getLogger(__name__)
 
@@ -112,6 +117,11 @@ class ReviewRequest(BaseModel):
     commit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
     diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: str = Field(default="", max_length=2000)
+
+
+class ProjectCheckRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    profile: str = Field(min_length=1, max_length=64)
 
 
 class TokenAuthMiddleware:
@@ -238,8 +248,21 @@ class TaskManager:
                                        protected_paths=list(profile.protected_paths), delivery_mode="review"),
                            repair_profile=profile, failure_log=request.failure_log)
 
+    def submit_project_check(self, request: ProjectCheckRequest) -> dict:
+        profile = self.repair_profiles.get(request.profile)
+        if profile is None:
+            raise ValueError("Unknown repair profile; an administrator must configure it first")
+        workspace = self._workspace(profile.workspace)
+        if not self.worktree_enabled or self.worktree_manager.repo_root(workspace) != workspace:
+            raise ValueError("Project checks require an enabled worktree and a Git repository root")
+        return self.submit(TaskRequest(task=f"项目接入检查 · {profile.title}", workspace=profile.workspace,
+                                       provider="mock", max_steps=1, delivery_mode="review"),
+                           project_check_profile=profile)
+
     def submit(self, request: TaskRequest, *, repair_profile: RepairProfile | None = None,
-               failure_log: str = "") -> dict:
+               failure_log: str = "", project_check_profile: RepairProfile | None = None) -> dict:
+        if repair_profile is not None and project_check_profile is not None:
+            raise ValueError("A task cannot be both a repair and a project check")
         workspace = self._workspace(request.workspace)
         task_id = uuid4().hex
         session_id = request.session_id or uuid4().hex
@@ -258,9 +281,11 @@ class TaskManager:
         "task": request.task,
         "request": request.model_dump(),
         "delivery_mode": request.delivery_mode,
-        "kind": "ci_repair" if repair_profile else "task",
+        "kind": "project_check" if project_check_profile else "ci_repair" if repair_profile else "task",
         "repair_profile": repair_profile.serialize() if repair_profile else None,
-        "profile_id": repair_profile.id if repair_profile else None,
+        "project_check_profile": project_check_profile.serialize() if project_check_profile else None,
+        "profile_id": (project_check_profile or repair_profile).id if project_check_profile or repair_profile else None,
+        "preflight_report": None,
         "failure_log": failure_log,
         "baseline": None,
         "post_verification": None,
@@ -396,6 +421,11 @@ class TaskManager:
     ) -> None:
         if cancel_event.is_set():
             self._update(task_id, status="cancelled", finished_at=_now())
+            return
+
+        record = self.get(task_id)
+        if record and record.get("kind") == "project_check":
+            self._run_project_check(task_id, workspace, cancel_event)
             return
 
         source_workspace = workspace
@@ -709,6 +739,91 @@ class TaskManager:
         if pending_update is not None:
             self._update(task_id, **pending_update)
 
+    def _run_project_check(self, task_id: str, workspace: Path, cancel_event: threading.Event) -> None:
+        """Run frozen admin checks only, never the agent or candidate delivery."""
+        lease = None
+        outcome = None
+        report = None
+        try:
+            record = self.get(task_id)
+            if record is None or record["status"] in TERMINAL_STATUSES:
+                return
+            profile = RepairProfile(**record["project_check_profile"])
+            source = self._workspace(profile.workspace)
+            if source != workspace or str(source) != record["source_workspace"]:
+                raise ValueError("Project-check workspace does not match the frozen administrator profile")
+            deadline = time.monotonic() + profile.deadline_seconds
+
+            def stopped() -> bool:
+                return (self._is_cancelled(task_id, cancel_event) or time.monotonic() >= deadline
+                        or (lease is not None and lease.lost))
+
+            self._update(task_id, status="running", started_at=_now())
+            lease = self.workspace_lock.acquire(source, cancelled=stopped)
+            if lease is None:
+                outcome = {"status": "cancelled" if self._is_cancelled(task_id, cancel_event) else "error",
+                           "error": "Project check stopped while waiting for the repository lock"}
+                return
+            if self.worktree_manager.repo_root(source) != source or not self.worktree_enabled:
+                raise WorktreeError("Project checks require an enabled worktree and a Git repository root")
+            before = inspect_project(source)
+            if before["state"] != "not_configured":
+                report = before
+            elif stopped():
+                report = before
+                report.update(state="cancelled", summary="检查已停止，未执行测试。")
+            else:
+                worktree = self.worktree_manager.create(source, task_id)
+                self._update(task_id, execution_workspace=str(worktree.workspace), worktree_path=str(worktree.path),
+                             worktree_branch=worktree.branch, worktree_source_branch=worktree.source_branch,
+                             worktree_base_commit=worktree.base_commit, worktree_cleaned=False)
+                if lease.lost:
+                    raise WorkspaceLockError("Workspace lock lease was lost before project checks")
+                report = inspect_project(worktree.workspace, profile.reproduce_commands,
+                                         timeout=profile.command_timeout, environment_config=self.environment_config,
+                                         cancelled=stopped)
+                after = inspect_project(source)
+                original_before, original_after = before["source_before"], after["source_before"]
+                report.update(source_repository_before=original_before, source_repository_after=original_after,
+                              source_repository_observations_unchanged=(original_before == original_after
+                                                                        if original_after is not None else None),
+                              execution_mode="managed_worktree",
+                              executor=self.environment_config.get("environment_class", "local"))
+                report["limitations"].append(
+                    "Managed worktrees share Git metadata and are not OS sandboxes; source observations are not a security guarantee.")
+                if original_after is None:
+                    report.update(state="error", summary="无法检查源仓库的执行后状态，不能认定接入检查通过。")
+                elif original_before != original_after:
+                    report.update(state="source_changed", summary="源仓库在检查期间发生变化；请人工检查，未自动清理或回滚。")
+            if self._is_cancelled(task_id, cancel_event):
+                report.update(state="cancelled", summary="接入检查已取消，不能认定检查通过。")
+            elif time.monotonic() >= deadline:
+                report.update(state="error", summary="接入检查达到管理员配置的总预算，不能认定检查通过。")
+            if lease.lost:
+                raise WorkspaceLockError("Workspace lock lease was lost during project checks")
+            outcome = {"status": report["state"], "preflight_report": report,
+                       "baseline": report["baseline"], "error": report["summary"] if report["state"] == "error" else None}
+        except Exception as error:  # noqa: BLE001 - background failures become task state.
+            if report is not None:
+                report.update(state="error", summary="接入检查执行异常，不能认定检查通过。", error_type=type(error).__name__)
+            outcome = {"status": "error", "preflight_report": report,
+                       "error": f"{type(error).__name__}: {error}"}
+        finally:
+            if lease is not None:
+                try:
+                    lease.release()
+                    if lease.lost:
+                        raise WorkspaceLockError("Workspace lock lease was lost")
+                except Exception as error:  # noqa: BLE001 - never publish a pass without ownership.
+                    if report is not None:
+                        report.update(state="error", summary="仓库锁失效，不能认定接入检查通过。")
+                    outcome = {"status": "error", "preflight_report": report,
+                               "error": f"{type(error).__name__}: {error}"}
+            if outcome is not None:
+                if report is not None:
+                    outcome.update(preflight_report=report, baseline=report["baseline"])
+                self._update(task_id, **outcome, finished_at=_now())
+
     def _mark_lock_failure(self, task_id: str, message: str) -> None:
         record = self.get(task_id)
         if record is not None and record["status"] not in {"error", "cancelled"}:
@@ -724,7 +839,7 @@ class TaskManager:
                    kind: str | None = None, workspace: str | None = None) -> dict:
         if task_status is not None and task_status not in TERMINAL_STATUSES | {"queued", "running"}:
             raise ValueError("Unknown task status")
-        if kind is not None and kind not in {"ci_repair", "task"}:
+        if kind is not None and kind not in {"ci_repair", "task", "project_check"}:
             raise ValueError("Unknown task kind")
         selected_workspace = str(self._workspace(workspace)) if workspace is not None else None
         return self.task_store.list_tasks(limit=limit, cursor=cursor, status=task_status, kind=kind,
@@ -934,6 +1049,18 @@ def create_app() -> FastAPI:
     async def repair_profiles() -> dict:
         return {"profiles": [profile.serialize() for profile in manager.repair_profiles.values()]}
 
+    @application.post("/project-checks", response_model=TaskAccepted, status_code=status.HTTP_202_ACCEPTED)
+    async def create_project_check(request: ProjectCheckRequest, response: Response) -> dict:
+        try:
+            record = manager.submit_project_check(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except TaskQueueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        response.headers["Location"] = f"/tasks/{record['id']}"
+        response.headers["Cache-Control"] = "no-store"
+        return record
+
     @application.post("/repairs", response_model=TaskAccepted, status_code=status.HTTP_202_ACCEPTED)
     async def create_repair(request: RepairRequest, response: Response) -> dict:
         try:
@@ -1003,7 +1130,7 @@ def create_app() -> FastAPI:
     @application.get("/tasks")
     async def list_tasks(response: Response, limit: Annotated[int, Query(ge=1, le=100)] = 20,
                          cursor: Annotated[str | None, Query(max_length=256)] = None,
-                         status: str | None = None, kind: Literal["ci_repair", "task"] | None = None,
+                         status: str | None = None, kind: Literal["ci_repair", "task", "project_check"] | None = None,
                          workspace: str | None = None) -> dict:
         try:
             response.headers["Cache-Control"] = "no-store"

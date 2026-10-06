@@ -7,6 +7,7 @@ import json
 import math
 import platform
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,7 +35,8 @@ def _snapshot(workspace: Path) -> dict:
 
 
 def inspect_project(workspace: str | Path, commands: tuple[str, ...] = (), *,
-                    timeout: float = 30, include_logs: bool = False) -> dict:
+                    timeout: float = 30, include_logs: bool = False,
+                    environment_config: dict | None = None, cancelled: Callable[[], bool] | None = None) -> dict:
     """Inspect Git, then run explicitly selected trusted checks in the source.
 
     This is not a sandbox or a repair operation. Commands can write files; source
@@ -59,7 +61,7 @@ def inspect_project(workspace: str | Path, commands: tuple[str, ...] = (), *,
         "baseline": {"state": "not_run", "checks": []},
         "model_invoked": False,
         "limitations": [
-            "Checks run locally in the source workspace, not in an OS sandbox or isolated worktree.",
+            "Checks use the selected executor in the supplied workspace; this helper does not create isolation.",
             "Only explicitly selected trusted commands run; no dependency installation or automatic repair.",
             "Git HEAD/branch/status observations exclude ignored files and cannot detect transient restored changes.",
             "Passing selected checks does not prove all behavior, test coverage or parity with remote CI.",
@@ -88,8 +90,11 @@ def inspect_project(workspace: str | Path, commands: tuple[str, ...] = (), *,
             report["baseline"]["state"] = "not_configured"
             return report
         try:
-            baseline = run_checks(workspace, commands, {"inherit_env": False},
-                                  timeout=timeout, cancelled=lambda: False)
+            config = dict(environment_config or {})
+            if config.get("environment_class", "local") == "local":
+                config.setdefault("inherit_env", False)
+            baseline = run_checks(workspace, commands, config,
+                                  timeout=timeout, cancelled=cancelled or (lambda: False))
             checks = []
             for check in baseline["checks"]:
                 item = {key: check[key] for key in ("command", "status", "returncode", "truncated")}
@@ -100,6 +105,7 @@ def inspect_project(workspace: str | Path, commands: tuple[str, ...] = (), *,
             state, summary = {
                 "passed": ("not_reproduced", "所选检查全部通过，未发现可复现故障；未调用模型或进入修复流程。"),
                 "failed": ("checks_failed", "检查失败；请审查失败输出，区分代码缺陷与依赖或环境问题。未自动修复。"),
+                "cancelled": ("cancelled", "检查已停止，不能认定测试通过。"),
             }.get(baseline["state"], ("error", "检查无法正常执行或超时，不能认定测试通过。"))
             report.update(state=state, summary=summary)
         finally:

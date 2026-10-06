@@ -70,6 +70,49 @@ Git 观察不覆盖 ignored 文件、修改后又恢复的临时行为或仓库�
 允许修改范围及保护文件，再进入 [人工审批的修复工单流程](ci-repair.md)。
 该入口不自动生成修复模板或业务契约测试。
 
+## 网页接入检查
+
+服务首页选择管理员模板后，可以点击“运行项目接入检查（不调用模型）”，
+不需要填写修复目标或失败日志。当前复用 `REPO_AGENT_REPAIR_PROFILES` 的模板：
+执行 `reproduce_commands`，不执行修复用的 `verification_commands` 或新增回归门禁。
+仓库、命令、单条超时、总预算和执行环境均由管理员固定。
+
+```bash
+curl -i http://127.0.0.1:8000/project-checks \
+  -H 'Authorization: Bearer YOUR_OPERATOR_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"profile":"python-project"}'
+```
+
+该接口返回 `202` 和 task ID；`Location` 指向 `/tasks/{id}`。请求仅允许 `profile`，
+不接受路径、命令、provider、预算、环境配置或 `include_logs` 覆盖。
+认证与现有修复 API 一致，仍是共享操作员令牌，不是多租户权限系统。
+
+网页流程和 CLI 的执行位置不同：CLI 在给定目录直接运行；网页要求启用 worktree，
+先检查源仓库状态，再从当前已提交版本创建独立 worktree。命令沿用管理员配置的
+local/Docker 执行器，不会绕过 Docker 配置回退到宿主机执行。
+被忽略的 `.env`、`.venv` 和构建产物不会复制，应预先准备合适的解释器或镜像。
+
+网页检查在整个执行期间持有源仓库锁，避免与本服务的建 worktree 或审批合入竞争。
+取消、截止预算和租约失效按命令边界协作处理，不会即时中断所有命令；
+租约丢失、释放失败或执行后 Git 查询失败都不能发布成功。
+测试对执行 worktree 的非忽略改动、源仓库 HEAD/分支/状态变化会报告 `source_changed`，
+保留现场，不自动清理、提交或回滚。worktree 仍共享 Git 元数据，不是安全沙箱。
+
+报告在 `/tasks/{id}` 的 `preflight_report` 中，网页会直接显示其摘要和 JSON。
+网页报告默认省略原始命令输出，但命令文本、本地路径和 Git 状态可能包含内部信息；
+分享前需审查。检查失败时，需人工查看实际失败输出并排除环境问题，
+不能仅凭 `checks_failed` 自动判定代码缺陷或伪造日志发起修复。
+
+接入检查的任务类型为 `project_check`，可用现有取消接口和 SSE 跟踪。
+历史列表支持 `kind=project_check` 和对应终态筛选，只显示摘要，不带报告或原始日志。
+Redis 存储/队列、TTL、历史窗口和降级行为沿用现有任务机制；未配置 Redis 时仅存内存。
+同样受当前进程 pending 上限限制；所有已创建 worktree 保留，不自动回收或提供 HTTP 续跑。
+
+任何检查结果都不会自动加载模型、写入对话记忆、产生候选或启动修复。
+要修复时仍需人工填写目标和真实失败日志，服务会在新 worktree 中重新复现，
+不会复用旧报告作为修复完成或人工审批的凭据。
+
 2026-10-05 本项目改动前的本地基线（commit `02eff43c4fbc74957d266f2ca547dfecf9c98017`）：
 仓库干净，`.venv/bin/python -m pytest -q` 得到 **379 passed in 27.60s**。
 这是本机实际测试结果，不是远程 GitHub Actions 成功记录，也不是修复成功率。
@@ -85,3 +128,14 @@ HEAD、分支和 Git 状态一致，未调用模型。使用现有虚拟环境�
 包含新增入口的开发版本另外通过 **415 个测试（28.74s）**、Ruff、compileall
 和 diff 检查；wheel/sdist 构建成功，并从 wheel 导入接入模块、核对 CLI 入口，
 验证仅检查仓库时返回 `not_configured` / 退出码 2。未安装或发布构建产物。
+
+2026-10-06 网页接入检查迭代：完整回归 **439 个测试**通过。
+新 API 使用认证的进程内 ASGI 客户端，对上述干净版本的 managed worktree
+实际执行 pytest、Ruff 和 diff 检查，三条命令均退出 0，报告 `not_reproduced`。
+源仓库和执行 worktree 的 Git 观察均未变化，无模型结果或候选，未合入或推送。
+报告保存在被 Git 忽略的 `eval-results/onboarding-web-20261006/report.json`，
+该 worktree 保留在报告记录的精确 `/tmp` 路径。
+
+控制台脚本通过语法检查和 Mock-DOM 冒烟检查（模板请求、文本渲染、终态按钮、
+不自动修复和原有审查控制），API 认证/历史/SSE 由集成测试验证。
+未验证真实浏览器布局、真实 Redis 多 worker 或实际 Docker 接入检查。

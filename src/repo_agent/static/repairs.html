@@ -12,13 +12,13 @@
 </style>
 </head>
 <body>
-<header><h1>CI 修复工单台</h1><p>复现失败 → 小范围修复 → 验证候选补丁 → 人工决定合入</p></header>
+<header><h1>CI 修复工单台</h1><p>项目接入检查 → 有真实失败才修复 → 验证候选补丁 → 人工决定合入</p></header>
 <main>
 <section class="card history">
 <h2>工单历史与待审批</h2>
 <div class="history-controls">
-<label for="history-status">状态<select id="history-status"><option value="">全部状态</option><option value="awaiting_review">待人工审批</option><option value="queued">排队中</option><option value="running">执行中</option><option value="approved">已批准</option><option value="rejected">已拒绝</option><option value="error">执行失败</option><option value="max_steps">预算耗尽</option><option value="cancelled">已取消</option><option value="not_reproduced">未复现</option><option value="completed">执行完成</option><option value="merge_conflict">合并冲突</option></select></label>
-<label for="history-kind">类型<select id="history-kind"><option value="ci_repair">修复工单</option><option value="task">通用任务</option><option value="">全部类型</option></select></label>
+<label for="history-status">状态<select id="history-status"><option value="">全部状态</option><option value="awaiting_review">待人工审批</option><option value="queued">排队中</option><option value="running">执行中</option><option value="approved">已批准</option><option value="rejected">已拒绝</option><option value="error">执行失败</option><option value="max_steps">预算耗尽</option><option value="cancelled">已取消</option><option value="not_reproduced">未发现可复现故障</option><option value="checks_failed">接入检查失败</option><option value="source_changed">检查期间仓库变化</option><option value="blocked">接入检查被阻止</option><option value="not_configured">未配置检查</option><option value="completed">执行完成</option><option value="merge_conflict">合并冲突</option></select></label>
+<label for="history-kind">类型<select id="history-kind"><option value="">全部类型</option><option value="project_check">项目接入检查</option><option value="ci_repair">修复工单</option><option value="task">通用任务</option></select></label>
 <label for="history-workspace">仓库<select id="history-workspace"><option value="">所有已授权仓库</option></select></label>
 <button id="history-refresh" class="secondary">刷新列表</button>
 </div>
@@ -26,21 +26,24 @@
 <ul id="history-list"></ul><button id="history-more" class="secondary" hidden>加载更早工单</button>
 </section>
 <section class="card">
-<h2>创建修复工单</h2>
+<h2>项目接入与修复</h2>
 <label for="token">访问令牌</label><input id="token" type="password" autocomplete="off" placeholder="服务配置了认证时填写">
 <button id="connect" class="secondary">加载修复模板</button>
 <label for="profile">服务端模板</label><select id="profile"><option value="">尚未加载</option></select>
 <p id="policy" class="note">仓库、验收命令和修改范围由管理员配置。</p>
+<button id="project-check" type="button" class="secondary" disabled>运行项目接入检查（不调用模型）</button>
+<p class="note">还没有失败日志？先运行管理员配置的复现命令。检查在独立 worktree 中执行，不安装依赖或生成补丁；worktree 不是安全沙箱。通过后无需启动修复；失败也需先区分代码与环境问题，确认真实失败日志后再提交下方表单。</p>
 <form id="submit-form">
 <label for="task">修复目标</label><textarea id="task" rows="3" maxlength="4000" required placeholder="修复分页边界错误，并增加回归测试"></textarea>
 <label for="failure-log">CI 失败日志</label><textarea id="failure-log" rows="9" maxlength="40000" required placeholder="粘贴失败测试和错误栈；请先移除日志中的凭据"></textarea>
-<button id="submit" type="submit">创建工单</button>
+<button id="submit" type="submit" disabled>创建修复工单</button>
 </form>
 <p class="note">模型不会自动合入。日志和仓库内容可能发给所配置的模型服务。仅用于受信任的内部环境，不是多租户沙箱。</p>
 <label for="task-id">查看已有工单</label><input id="task-id" placeholder="粘贴 task ID"><button id="load" class="secondary">查看</button>
 </section>
 <section class="card">
 <h2>执行与审查</h2><div id="state" class="state">等待工单</div><p id="meta" class="note"></p><div id="notice" role="alert"></div>
+<details id="preflight-section" open hidden><summary>项目接入报告（未调用模型）</summary><p id="preflight-summary" class="note"></p><pre id="preflight-report">尚未运行</pre></details>
 <details open><summary>模型总结</summary><pre id="answer">创建或加载工单后显示结果。</pre></details>
 <details><summary>失败复现</summary><pre id="baseline">尚未运行</pre></details>
 <details><summary>最终验证与范围检查</summary><pre id="checks">尚未运行</pre></details>
@@ -62,8 +65,8 @@
 const el=id=>document.getElementById(id);
 let profiles=[],current=null,timer=null,watchVersion=0;
 let historyRows=[],historyCursor=null,historyVersion=0;
-const terminal=new Set(['completed','awaiting_review','approved','rejected','not_reproduced','error','cancelled','max_steps','merge_conflict']);
-const labels={queued:'排队中',running:'执行中',awaiting_review:'等待人工审查',approved:'已批准并合入',rejected:'已拒绝（保留工作区）',not_reproduced:'未复现失败，未启动模型修复',error:'执行失败',cancelled:'已取消',max_steps:'预算耗尽，未完成',completed:'执行完成',merge_conflict:'合并冲突'};
+const terminal=new Set(['completed','awaiting_review','approved','rejected','not_reproduced','error','cancelled','max_steps','merge_conflict','checks_failed','source_changed','blocked','not_configured']);
+const labels={queued:'排队中',running:'执行中',awaiting_review:'等待人工审查',approved:'已批准并合入',rejected:'已拒绝（保留工作区）',not_reproduced:'未发现可复现故障，未启动模型修复',checks_failed:'检查失败，需人工诊断（未调用模型）',source_changed:'检查期间仓库发生变化，需人工检查',blocked:'接入检查被仓库状态阻止',not_configured:'未配置检查，不代表测试通过',error:'执行失败',cancelled:'已取消',max_steps:'预算耗尽，未完成',completed:'执行完成',merge_conflict:'合并冲突'};
 async function api(path,method='GET',body){
  const headers={};const token=el('token').value;if(token)headers.Authorization='Bearer '+token;
  if(body)headers['Content-Type']='application/json';
@@ -71,7 +74,7 @@ async function api(path,method='GET',body){
  const data=await response.json();if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));return data;
 }
 function notice(error){el('notice').textContent=error?String(error.message||error):'';}
-function showPolicy(){const p=profiles.find(p=>p.id===el('profile').value);el('policy').textContent=p?`仓库：${p.workspace}\n允许修改：${p.allowed_paths.join(', ')}\n模型步数上限：${p.max_steps}\n验收：${p.verification_commands.join('; ')}`:'管理员尚未配置修复模板。';}
+function showPolicy(){const p=profiles.find(p=>p.id===el('profile').value);el('policy').textContent=p?`仓库：${p.workspace}\n接入检查 / 复现：${p.reproduce_commands.join('; ')}\n命令超时：${p.command_timeout}s · 总预算：${p.deadline_seconds}s\n允许修改：${p.allowed_paths.join(', ')}\n模型步数上限：${p.max_steps}\n修复验收：${p.verification_commands.join('; ')}`:'管理员尚未配置修复模板。';el('project-check').disabled=el('submit').disabled=!p;}
 async function connect(){try{notice('');const data=await api('/repair-profiles');profiles=data.profiles;el('profile').replaceChildren();for(const p of profiles){const option=document.createElement('option');option.value=p.id;option.textContent=p.title+' · '+p.id;el('profile').append(option);}if(!profiles.length){const option=document.createElement('option');option.textContent='暂无模板';option.value='';el('profile').append(option);}showPolicy();populateHistoryWorkspaces();await loadHistory();}catch(error){notice(error);}}
 function populateHistoryWorkspaces(){
  const selected=el('history-workspace').value;
@@ -107,14 +110,30 @@ async function loadHistory(reset=true){
  }catch(error){if(version===historyVersion)el('history-note').textContent='历史加载失败：'+error.message;}
  finally{if(version===historyVersion)el('history-refresh').disabled=el('history-more').disabled=false;}
 }
-function render(record){current=record;el('state').textContent=labels[record.status]||record.status;el('meta').textContent=`工单 ${record.id} · ${record.delivery_mode||'review'} · ${record.worktree_branch||'等待工作区'}`+(record.candidate?` · 候选 ${record.candidate.commit}`:'');el('task-id').value=record.id;el('answer').textContent=record.result?.answer||'尚无模型总结';el('baseline').textContent=JSON.stringify(record.baseline||'尚未运行',null,2);el('checks').textContent=JSON.stringify({final:record.post_verification,scope:record.scope_review,approval:record.approval_verification,review:record.review},null,2);el('handoff').textContent=JSON.stringify(record.result?.handoff||'暂无',null,2);el('diff').textContent=record.candidate?.diff||'暂无候选补丁';el('review').hidden=record.status!=='awaiting_review'||!record.candidate;el('export').hidden=!record.candidate||!['awaiting_review','approved','rejected'].includes(record.status);el('cancel').hidden=terminal.has(record.status);notice(record.error||'');}
+function render(record){
+ current=record;const isCheck=record.kind==='project_check';
+ el('state').textContent=labels[record.status]||record.status;
+ el('meta').textContent=`${isCheck?'接入检查':'工单'} ${record.id} · ${record.profile_id||record.delivery_mode||'review'} · ${record.worktree_branch||'等待工作区'}`+(record.candidate?` · 候选 ${record.candidate.commit}`:'');
+ el('task-id').value=record.id;el('preflight-section').hidden=!isCheck;
+ el('preflight-summary').textContent=record.preflight_report?.summary||(isCheck?'检查尚未完成，不代表测试通过。':'');
+ el('preflight-report').textContent=JSON.stringify(record.preflight_report||'尚未运行',null,2);
+ el('answer').textContent=isCheck?'接入检查不启动模型，无模型总结。':record.result?.answer||'尚无模型总结';
+ el('baseline').textContent=JSON.stringify(record.baseline||'尚未运行',null,2);
+ el('checks').textContent=JSON.stringify({final:record.post_verification,scope:record.scope_review,approval:record.approval_verification,review:record.review},null,2);
+ el('handoff').textContent=JSON.stringify(record.result?.handoff||'暂无',null,2);
+ el('diff').textContent=record.candidate?.diff||(isCheck?'接入检查不生成候选补丁。':'暂无候选补丁');
+ el('review').hidden=isCheck||record.status!=='awaiting_review'||!record.candidate;
+ el('export').hidden=isCheck||!record.candidate||!['awaiting_review','approved','rejected'].includes(record.status);
+ el('cancel').hidden=terminal.has(record.status);notice(record.error||'');
+}
 async function poll(id,version){try{const record=await api('/tasks/'+encodeURIComponent(id));if(version!==watchVersion)return;const priorStatus=current?.status;render(record);if(priorStatus&&priorStatus!==record.status)loadHistory();if(!terminal.has(record.status))timer=setTimeout(()=>poll(id,version),1500);}catch(error){if(version===watchVersion)notice(error);}}
-async function watch(id){clearTimeout(timer);const version=++watchVersion;current=null;el('review').hidden=el('cancel').hidden=el('export').hidden=true;await poll(id,version);}
+async function watch(id){clearTimeout(timer);const version=++watchVersion;current=null;el('review').hidden=el('cancel').hidden=el('export').hidden=el('preflight-section').hidden=true;await poll(id,version);}
 el('connect').onclick=connect;el('profile').onchange=showPolicy;
 el('load').onclick=()=>watch(el('task-id').value.trim());
 el('history-refresh').onclick=()=>loadHistory();el('history-more').onclick=()=>loadHistory(false);
 for(const id of ['history-status','history-kind','history-workspace'])el(id).onchange=()=>loadHistory();
-el('submit-form').onsubmit=async event=>{event.preventDefault();el('submit').disabled=true;try{notice('');const record=await api('/repairs','POST',{profile:el('profile').value,task:el('task').value,failure_log:el('failure-log').value});await watch(record.id);await loadHistory();}catch(error){notice(error);}finally{el('submit').disabled=false;}};
+el('project-check').onclick=async()=>{el('project-check').disabled=true;try{notice('');const record=await api('/project-checks','POST',{profile:el('profile').value});await watch(record.id);await loadHistory();}catch(error){notice(error);}finally{el('project-check').disabled=!profiles.some(p=>p.id===el('profile').value);}};
+el('submit-form').onsubmit=async event=>{event.preventDefault();el('submit').disabled=true;try{notice('');const record=await api('/repairs','POST',{profile:el('profile').value,task:el('task').value,failure_log:el('failure-log').value});await watch(record.id);await loadHistory();}catch(error){notice(error);}finally{el('submit').disabled=!profiles.some(p=>p.id===el('profile').value);}};
 async function decide(approve){if(!current?.candidate)return;if(approve&&!confirm('确认合入当前已审查的候选补丁？'))return;const version=watchVersion;el('approve').disabled=el('reject').disabled=true;try{const c=current.candidate;const record=await api('/tasks/'+current.id+(approve?'/approve':'/reject'),'POST',{commit:c.commit,diff_sha256:c.diff_sha256,reason:el('reason').value});if(version===watchVersion){render(record);await loadHistory();}}catch(error){if(version===watchVersion)notice(error);}finally{el('approve').disabled=el('reject').disabled=false;}}
 el('approve').onclick=()=>decide(true);el('reject').onclick=()=>decide(false);
 async function downloadCandidate(patch){
