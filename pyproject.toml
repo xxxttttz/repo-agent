@@ -42,6 +42,7 @@ repo-agent = "repo_agent.run.local:main"
 repo-agent-api = "repo_agent.api:run"
 repo-agent-eval = "repo_agent.evaluation.runner:main"
 repo-agent-repair-eval = "repo_agent.evaluation.repairs:main"
+repo-agent-preflight = "repo_agent.preflight:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -8,6 +8,12 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ### Added
 
+- Model-free `repo-agent-preflight` project onboarding with opt-in trusted local
+  checks, fail-closed Git inspection, dirty/detached-source blocking, before/after
+  source observations and JSON reports. Passing checks report `not_reproduced`;
+  no automatic repair, installation, commit, cleanup or remote writes. Raw check
+  logs are opt-in; local command execution is not an isolation boundary.
+
 - Trusted host-side repair scope preflight before and after submission checks,
   with changed-path/file-budget diagnostics for in-budget model recovery.
   Git failures fail closed; per-submission receipts never reuse earlier passes.
